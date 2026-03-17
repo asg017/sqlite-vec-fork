@@ -162,7 +162,9 @@ def test_shadow_tables_exist(db):
         ).fetchall()
     ]
     assert "t_rescore_chunks00" in tables
-    assert "t_vector_chunks00" in tables
+    assert "t_rescore_vectors00" in tables
+    # Rescore columns don't create _vector_chunks
+    assert "t_vector_chunks00" not in tables
 
 
 def test_drop_cleans_up(db):
