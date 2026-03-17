@@ -927,6 +927,447 @@ void test_distance_hamming() {
   printf("  All distance_hamming tests passed.\n");
 }
 
+void test_vec0_parse_vector_column_diskann() {
+  printf("Starting %s...\n", __func__);
+  struct VectorColumnDefinition col;
+  int rc;
+
+  // Existing syntax (no INDEXED BY) should have diskann.enabled == 0
+  {
+    const char *input = "emb float[128]";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == SQLITE_OK);
+    assert(col.index_type != VEC0_INDEX_TYPE_DISKANN);
+    sqlite3_free(col.name);
+  }
+
+  // With distance_metric but no INDEXED BY
+  {
+    const char *input = "emb float[128] distance_metric=cosine";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == SQLITE_OK);
+    assert(col.index_type != VEC0_INDEX_TYPE_DISKANN);
+    assert(col.distance_metric == VEC0_DISTANCE_METRIC_COSINE);
+    sqlite3_free(col.name);
+  }
+
+  // Basic binary quantizer
+  {
+    const char *input = "emb float[128] INDEXED BY diskann(neighbor_quantizer=binary)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == SQLITE_OK);
+    assert(col.index_type == VEC0_INDEX_TYPE_DISKANN);
+    assert(col.diskann.quantizer_type == VEC0_DISKANN_QUANTIZER_BINARY);
+    assert(col.diskann.n_neighbors == 72);  // default
+    assert(col.diskann.search_list_size == 128);  // default
+    assert(col.dimensions == 128);
+    sqlite3_free(col.name);
+  }
+
+  // INT8 quantizer
+  {
+    const char *input = "v float[64] INDEXED BY diskann(neighbor_quantizer=int8)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == SQLITE_OK);
+    assert(col.index_type == VEC0_INDEX_TYPE_DISKANN);
+    assert(col.diskann.quantizer_type == VEC0_DISKANN_QUANTIZER_INT8);
+    sqlite3_free(col.name);
+  }
+
+  // Custom n_neighbors
+  {
+    const char *input = "emb float[128] INDEXED BY diskann(neighbor_quantizer=binary, n_neighbors=48)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == SQLITE_OK);
+    assert(col.index_type == VEC0_INDEX_TYPE_DISKANN);
+    assert(col.diskann.n_neighbors == 48);
+    sqlite3_free(col.name);
+  }
+
+  // Custom search_list_size
+  {
+    const char *input = "emb float[128] INDEXED BY diskann(neighbor_quantizer=binary, search_list_size=256)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == SQLITE_OK);
+    assert(col.diskann.search_list_size == 256);
+    sqlite3_free(col.name);
+  }
+
+  // Combined with distance_metric (distance_metric first)
+  {
+    const char *input = "emb float[128] distance_metric=cosine INDEXED BY diskann(neighbor_quantizer=int8)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == SQLITE_OK);
+    assert(col.distance_metric == VEC0_DISTANCE_METRIC_COSINE);
+    assert(col.index_type == VEC0_INDEX_TYPE_DISKANN);
+    assert(col.diskann.quantizer_type == VEC0_DISKANN_QUANTIZER_INT8);
+    sqlite3_free(col.name);
+  }
+
+  // Error: missing neighbor_quantizer (required)
+  {
+    const char *input = "emb float[128] INDEXED BY diskann(n_neighbors=72)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == SQLITE_ERROR);
+  }
+
+  // Error: empty parens
+  {
+    const char *input = "emb float[128] INDEXED BY diskann()";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == SQLITE_ERROR);
+  }
+
+  // Error: unknown quantizer
+  {
+    const char *input = "emb float[128] INDEXED BY diskann(neighbor_quantizer=unknown)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == SQLITE_ERROR);
+  }
+
+  // Error: bad n_neighbors (not divisible by 8)
+  {
+    const char *input = "emb float[128] INDEXED BY diskann(neighbor_quantizer=binary, n_neighbors=13)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == SQLITE_ERROR);
+  }
+
+  // Error: n_neighbors too large
+  {
+    const char *input = "emb float[128] INDEXED BY diskann(neighbor_quantizer=binary, n_neighbors=512)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == SQLITE_ERROR);
+  }
+
+  // Error: missing BY
+  {
+    const char *input = "emb float[128] INDEXED diskann(neighbor_quantizer=binary)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == SQLITE_ERROR);
+  }
+
+  // Error: unknown algorithm
+  {
+    const char *input = "emb float[128] INDEXED BY hnsw(neighbor_quantizer=binary)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == SQLITE_ERROR);
+  }
+
+  // Error: unknown option key
+  {
+    const char *input = "emb float[128] INDEXED BY diskann(neighbor_quantizer=binary, foobar=baz)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == SQLITE_ERROR);
+  }
+
+  // Case insensitivity for keywords
+  {
+    const char *input = "emb float[128] indexed by DISKANN(NEIGHBOR_QUANTIZER=BINARY)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == SQLITE_OK);
+    assert(col.index_type == VEC0_INDEX_TYPE_DISKANN);
+    assert(col.diskann.quantizer_type == VEC0_DISKANN_QUANTIZER_BINARY);
+    sqlite3_free(col.name);
+  }
+
+  printf("  All vec0_parse_vector_column_diskann tests passed.\n");
+}
+
+void test_diskann_validity_bitmap() {
+  printf("Starting %s...\n", __func__);
+
+  unsigned char validity[3]; // 24 bits
+  memset(validity, 0, sizeof(validity));
+
+  // All initially invalid
+  for (int i = 0; i < 24; i++) {
+    assert(diskann_validity_get(validity, i) == 0);
+  }
+  assert(diskann_validity_count(validity, 24) == 0);
+
+  // Set bit 0
+  diskann_validity_set(validity, 0, 1);
+  assert(diskann_validity_get(validity, 0) == 1);
+  assert(diskann_validity_count(validity, 24) == 1);
+
+  // Set bit 7 (last bit of first byte)
+  diskann_validity_set(validity, 7, 1);
+  assert(diskann_validity_get(validity, 7) == 1);
+  assert(diskann_validity_count(validity, 24) == 2);
+
+  // Set bit 8 (first bit of second byte)
+  diskann_validity_set(validity, 8, 1);
+  assert(diskann_validity_get(validity, 8) == 1);
+  assert(diskann_validity_count(validity, 24) == 3);
+
+  // Set bit 23 (last bit)
+  diskann_validity_set(validity, 23, 1);
+  assert(diskann_validity_get(validity, 23) == 1);
+  assert(diskann_validity_count(validity, 24) == 4);
+
+  // Clear bit 0
+  diskann_validity_set(validity, 0, 0);
+  assert(diskann_validity_get(validity, 0) == 0);
+  assert(diskann_validity_count(validity, 24) == 3);
+
+  // Other bits unaffected
+  assert(diskann_validity_get(validity, 7) == 1);
+  assert(diskann_validity_get(validity, 8) == 1);
+
+  printf("  All diskann_validity_bitmap tests passed.\n");
+}
+
+void test_diskann_neighbor_ids() {
+  printf("Starting %s...\n", __func__);
+
+  unsigned char ids[8 * 8]; // 8 slots * 8 bytes each
+  memset(ids, 0, sizeof(ids));
+
+  // Set and get slot 0
+  diskann_neighbor_id_set(ids, 0, 42);
+  assert(diskann_neighbor_id_get(ids, 0) == 42);
+
+  // Set and get middle slot
+  diskann_neighbor_id_set(ids, 3, 12345);
+  assert(diskann_neighbor_id_get(ids, 3) == 12345);
+
+  // Set and get last slot
+  diskann_neighbor_id_set(ids, 7, 99999);
+  assert(diskann_neighbor_id_get(ids, 7) == 99999);
+
+  // Slot 0 still correct
+  assert(diskann_neighbor_id_get(ids, 0) == 42);
+
+  // Large value
+  diskann_neighbor_id_set(ids, 1, INT64_MAX);
+  assert(diskann_neighbor_id_get(ids, 1) == INT64_MAX);
+
+  printf("  All diskann_neighbor_ids tests passed.\n");
+}
+
+void test_diskann_quantize_binary() {
+  printf("Starting %s...\n", __func__);
+
+  // 8-dimensional vector: positive values -> 1, negative/zero -> 0
+  float src[8] = {1.0f, -1.0f, 0.5f, 0.0f, -0.5f, 0.1f, -0.1f, 100.0f};
+  unsigned char out[1]; // 8 bits = 1 byte
+
+  int rc = diskann_quantize_vector(src, 8, VEC0_DISKANN_QUANTIZER_BINARY, out);
+  assert(rc == 0);
+
+  // Expected bits (LSB first within each byte):
+  // bit 0: 1.0 > 0 -> 1
+  // bit 1: -1.0 > 0 -> 0
+  // bit 2: 0.5 > 0 -> 1
+  // bit 3: 0.0 > 0 -> 0  (not strictly greater)
+  // bit 4: -0.5 > 0 -> 0
+  // bit 5: 0.1 > 0 -> 1
+  // bit 6: -0.1 > 0 -> 0
+  // bit 7: 100.0 > 0 -> 1
+  // Expected byte: 1 + 0 + 4 + 0 + 0 + 32 + 0 + 128 = 0b10100101 = 0xA5
+  assert(out[0] == 0xA5);
+
+  printf("  All diskann_quantize_binary tests passed.\n");
+}
+
+void test_diskann_node_init_sizes() {
+  printf("Starting %s...\n", __func__);
+
+  unsigned char *validity, *ids, *qvecs;
+  int validitySize, idsSize, qvecsSize;
+
+  // 72 neighbors, binary quantizer, 1024 dims
+  int rc = diskann_node_init(72, VEC0_DISKANN_QUANTIZER_BINARY, 1024,
+      &validity, &validitySize, &ids, &idsSize, &qvecs, &qvecsSize);
+  assert(rc == 0);
+  assert(validitySize == 9);      // 72/8
+  assert(idsSize == 576);         // 72 * 8
+  assert(qvecsSize == 9216);      // 72 * (1024/8)
+
+  // All validity bits should be 0
+  assert(diskann_validity_count(validity, 72) == 0);
+
+  sqlite3_free(validity);
+  sqlite3_free(ids);
+  sqlite3_free(qvecs);
+
+  // 8 neighbors, int8 quantizer, 32 dims
+  rc = diskann_node_init(8, VEC0_DISKANN_QUANTIZER_INT8, 32,
+      &validity, &validitySize, &ids, &idsSize, &qvecs, &qvecsSize);
+  assert(rc == 0);
+  assert(validitySize == 1);    // 8/8
+  assert(idsSize == 64);        // 8 * 8
+  assert(qvecsSize == 256);     // 8 * 32
+
+  sqlite3_free(validity);
+  sqlite3_free(ids);
+  sqlite3_free(qvecs);
+
+  printf("  All diskann_node_init_sizes tests passed.\n");
+}
+
+void test_diskann_node_set_clear_neighbor() {
+  printf("Starting %s...\n", __func__);
+
+  unsigned char *validity, *ids, *qvecs;
+  int validitySize, idsSize, qvecsSize;
+
+  // 8 neighbors, binary quantizer, 16 dims (2 bytes per qvec)
+  int rc = diskann_node_init(8, VEC0_DISKANN_QUANTIZER_BINARY, 16,
+      &validity, &validitySize, &ids, &idsSize, &qvecs, &qvecsSize);
+  assert(rc == 0);
+
+  // Create a test quantized vector (2 bytes)
+  unsigned char test_qvec[2] = {0xAB, 0xCD};
+
+  // Set neighbor at slot 3
+  diskann_node_set_neighbor(validity, ids, qvecs, 3,
+      42, test_qvec, VEC0_DISKANN_QUANTIZER_BINARY, 16);
+
+  // Verify slot 3 is valid
+  assert(diskann_validity_get(validity, 3) == 1);
+  assert(diskann_validity_count(validity, 8) == 1);
+
+  // Verify rowid
+  assert(diskann_neighbor_id_get(ids, 3) == 42);
+
+  // Verify quantized vector
+  const unsigned char *read_qvec = diskann_neighbor_qvec_get(
+      qvecs, 3, VEC0_DISKANN_QUANTIZER_BINARY, 16);
+  assert(read_qvec[0] == 0xAB);
+  assert(read_qvec[1] == 0xCD);
+
+  // Clear slot 3
+  diskann_node_clear_neighbor(validity, ids, qvecs, 3,
+      VEC0_DISKANN_QUANTIZER_BINARY, 16);
+  assert(diskann_validity_get(validity, 3) == 0);
+  assert(diskann_neighbor_id_get(ids, 3) == 0);
+  assert(diskann_validity_count(validity, 8) == 0);
+
+  sqlite3_free(validity);
+  sqlite3_free(ids);
+  sqlite3_free(qvecs);
+
+  printf("  All diskann_node_set_clear_neighbor tests passed.\n");
+}
+
+void test_diskann_prune_select() {
+  printf("Starting %s...\n", __func__);
+
+  // Scenario: 5 candidates, sorted by distance to p
+  // Candidates: A(0), B(1), C(2), D(3), E(4)
+  // p_distances (already sorted): A=1.0, B=2.0, C=3.0, D=4.0, E=5.0
+  //
+  // Inter-candidate distances (5x5 matrix):
+  //       A     B     C     D     E
+  // A   0.0   1.5   3.0   4.0   5.0
+  // B   1.5   0.0   1.5   3.0   4.0
+  // C   3.0   1.5   0.0   1.5   3.0
+  // D   4.0   3.0   1.5   0.0   1.5
+  // E   5.0   4.0   3.0   1.5   0.0
+
+  float p_distances[5] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f};
+  float inter[25] = {
+    0.0f, 1.5f, 3.0f, 4.0f, 5.0f,
+    1.5f, 0.0f, 1.5f, 3.0f, 4.0f,
+    3.0f, 1.5f, 0.0f, 1.5f, 3.0f,
+    4.0f, 3.0f, 1.5f, 0.0f, 1.5f,
+    5.0f, 4.0f, 3.0f, 1.5f, 0.0f,
+  };
+  int selected[5];
+  int count;
+
+  // alpha=1.0, R=3: greedy selection
+  // Round 1: Pick A (closest). Prune check:
+  //   B: 1.0*1.5 <= 2.0? yes -> pruned
+  //   C: 1.0*3.0 <= 3.0? yes -> pruned
+  //   D: 1.0*4.0 <= 4.0? yes -> pruned
+  //   E: 1.0*5.0 <= 5.0? yes -> pruned
+  // Result: only A selected
+  {
+    int rc = diskann_prune_select(inter, p_distances, 5, 1.0f, 3, selected, &count);
+    assert(rc == 0);
+    assert(count == 1);
+    assert(selected[0] == 1); // A
+  }
+
+  // alpha=1.5, R=3: diversity-aware
+  // Round 1: Pick A. Prune check:
+  //   B: 1.5*1.5=2.25 <= 2.0? no -> keep
+  //   C: 1.5*3.0=4.5 <= 3.0? no -> keep
+  //   D: 1.5*4.0=6.0 <= 4.0? no -> keep
+  //   E: 1.5*5.0=7.5 <= 5.0? no -> keep
+  // Round 2: Pick B. Prune check:
+  //   C: 1.5*1.5=2.25 <= 3.0? yes -> pruned
+  //   D: 1.5*3.0=4.5 <= 4.0? no -> keep
+  //   E: 1.5*4.0=6.0 <= 5.0? no -> keep
+  // Round 3: Pick D. Done, 3 selected.
+  {
+    int rc = diskann_prune_select(inter, p_distances, 5, 1.5f, 3, selected, &count);
+    assert(rc == 0);
+    assert(count == 3);
+    assert(selected[0] == 1); // A
+    assert(selected[1] == 1); // B
+    assert(selected[3] == 1); // D
+    assert(selected[2] == 0); // C pruned
+    assert(selected[4] == 0); // E not reached
+  }
+
+  // R > num_candidates with very high alpha (no pruning): select all
+  {
+    int rc = diskann_prune_select(inter, p_distances, 5, 100.0f, 10, selected, &count);
+    assert(rc == 0);
+    assert(count == 5);
+  }
+
+  // Empty candidate set
+  {
+    int rc = diskann_prune_select(NULL, NULL, 0, 1.2f, 3, selected, &count);
+    assert(rc == 0);
+    assert(count == 0);
+  }
+
+  printf("  All diskann_prune_select tests passed.\n");
+}
+
+void test_diskann_quantized_vector_byte_size() {
+  printf("Starting %s...\n", __func__);
+
+  // Binary quantizer: 1 bit per dimension, so 128 dims = 16 bytes
+  assert(diskann_quantized_vector_byte_size(VEC0_DISKANN_QUANTIZER_BINARY, 128) == 16);
+  assert(diskann_quantized_vector_byte_size(VEC0_DISKANN_QUANTIZER_BINARY, 8) == 1);
+  assert(diskann_quantized_vector_byte_size(VEC0_DISKANN_QUANTIZER_BINARY, 1024) == 128);
+
+  // INT8 quantizer: 1 byte per dimension
+  assert(diskann_quantized_vector_byte_size(VEC0_DISKANN_QUANTIZER_INT8, 128) == 128);
+  assert(diskann_quantized_vector_byte_size(VEC0_DISKANN_QUANTIZER_INT8, 1) == 1);
+  assert(diskann_quantized_vector_byte_size(VEC0_DISKANN_QUANTIZER_INT8, 768) == 768);
+
+  printf("  All diskann_quantized_vector_byte_size tests passed.\n");
+}
+
+void test_diskann_config_defaults() {
+  printf("Starting %s...\n", __func__);
+
+  // A freshly zero-initialized VectorColumnDefinition should have diskann.enabled == 0
+  struct VectorColumnDefinition col;
+  memset(&col, 0, sizeof(col));
+  assert(col.index_type != VEC0_INDEX_TYPE_DISKANN);
+  assert(col.diskann.n_neighbors == 0);
+  assert(col.diskann.search_list_size == 0);
+
+  // Verify parsing a normal vector column still works and diskann is not enabled
+  {
+    const char *input = "embedding float[768]";
+    int rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == 0 /* SQLITE_OK */);
+    assert(col.index_type != VEC0_INDEX_TYPE_DISKANN);
+    sqlite3_free(col.name);
+  }
+
+  printf("  All diskann_config_defaults tests passed.\n");
+}
+
 int main() {
   printf("Starting unit tests...\n");
 #ifdef SQLITE_VEC_ENABLE_AVX
@@ -945,5 +1386,14 @@ int main() {
   test_distance_l2_sqr_float();
   test_distance_cosine_float();
   test_distance_hamming();
+  test_vec0_parse_vector_column_diskann();
+  test_diskann_validity_bitmap();
+  test_diskann_neighbor_ids();
+  test_diskann_quantize_binary();
+  test_diskann_node_init_sizes();
+  test_diskann_node_set_clear_neighbor();
+  test_diskann_prune_select();
+  test_diskann_quantized_vector_byte_size();
+  test_diskann_config_defaults();
   printf("All unit tests passed.\n");
 }
