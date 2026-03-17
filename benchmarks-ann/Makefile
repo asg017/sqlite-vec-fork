@@ -30,6 +30,17 @@ ALL_CONFIGS = $(BASELINES) $(RESCORE_CONFIGS) $(IVF_CONFIGS) $(DISKANN_CONFIGS)
 
 .PHONY: seed ground-truth bench-smoke bench-rescore bench-ivf bench-diskann bench-10k bench-50k bench-100k bench-all \
         report clean
+# --- Annoy configs ---
+ANNOY_CONFIGS = \
+	"annoy-t10:type=annoy,n_trees=10" \
+	"annoy-t25:type=annoy,n_trees=25" \
+	"annoy-t50:type=annoy,n_trees=50" \
+	"annoy-t100:type=annoy,n_trees=100"
+
+ALL_CONFIGS = $(BASELINES) $(ANNOY_CONFIGS)
+
+.PHONY: seed ground-truth bench-smoke bench-10k bench-50k bench-100k bench-all \
+        bench-annoy report clean
 
 # --- Data preparation ---
 seed:
@@ -50,6 +61,7 @@ bench-smoke: seed
 bench-rescore: seed
 	$(BENCH) --subset-size 10000 -k 10 -o runs/rescore \
 		$(RESCORE_CONFIGS)
+		"annoy-quick:type=annoy,n_trees=10"
 
 # --- Standard sizes ---
 bench-10k: seed
@@ -74,6 +86,11 @@ bench-diskann: seed
 	$(BENCH) --subset-size 10000 -k 10 -o runs/diskann $(BASELINES) $(DISKANN_CONFIGS)
 	$(BENCH) --subset-size 50000 -k 10 -o runs/diskann $(BASELINES) $(DISKANN_CONFIGS)
 	$(BENCH) --subset-size 100000 -k 10 -o runs/diskann $(BASELINES) $(DISKANN_CONFIGS)
+# --- Annoy across sizes ---
+bench-annoy: seed
+	$(BENCH) --subset-size 10000 -k 10 -o runs/annoy $(BASELINES) $(ANNOY_CONFIGS)
+	$(BENCH) --subset-size 50000 -k 10 -o runs/annoy $(BASELINES) $(ANNOY_CONFIGS)
+	$(BENCH) --subset-size 100000 -k 10 -o runs/annoy $(BASELINES) $(ANNOY_CONFIGS)
 
 # --- Report ---
 report:
