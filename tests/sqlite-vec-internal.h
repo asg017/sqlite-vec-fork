@@ -65,6 +65,31 @@ enum Vec0DistanceMetrics {
 
 enum Vec0IndexType {
   VEC0_INDEX_TYPE_FLAT = 1,
+  VEC0_INDEX_TYPE_RESCORE = 2,
+  VEC0_INDEX_TYPE_IVF = 3,
+};
+
+enum Vec0RescoreQuantizerType {
+  VEC0_RESCORE_QUANTIZER_BIT = 1,
+  VEC0_RESCORE_QUANTIZER_INT8 = 2,
+};
+
+struct Vec0RescoreConfig {
+  enum Vec0RescoreQuantizerType quantizer_type;
+  int oversample;
+};
+
+enum Vec0IvfQuantizer {
+  VEC0_IVF_QUANTIZER_NONE = 0,
+  VEC0_IVF_QUANTIZER_INT8 = 1,
+  VEC0_IVF_QUANTIZER_BINARY = 2,
+};
+
+struct Vec0IvfConfig {
+  int nlist;
+  int nprobe;
+  int quantizer;
+  int oversample;
 };
 
 struct VectorColumnDefinition {
@@ -74,6 +99,8 @@ struct VectorColumnDefinition {
   enum VectorElementType element_type;
   enum Vec0DistanceMetrics distance_metric;
   enum Vec0IndexType index_type;
+  struct Vec0RescoreConfig rescore;
+  struct Vec0IvfConfig ivf;
 };
 
 int vec0_parse_vector_column(const char *source, int source_length,
