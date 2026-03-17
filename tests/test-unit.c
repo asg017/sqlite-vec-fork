@@ -4,6 +4,7 @@
 #include <string.h>
 #include <assert.h>
 #include <math.h>
+#include <stdint.h>
 
 #define countof(x) (sizeof(x) / sizeof((x)[0]))
 
@@ -247,15 +248,15 @@ void test_vec0_scanner() {
     assert(rc == VEC0_TOKEN_RESULT_EOF);
   }
 
-  // Scan "diskann(k=v, k2=v2)"
+  // Scan "myindex(k=v, k2=v2)"
   {
-    const char *input = "diskann(k=v, k2=v2)";
+    const char *input = "myindex(k=v, k2=v2)";
     vec0_scanner_init(&scanner, input, (int)strlen(input));
 
     rc = vec0_scanner_next(&scanner, &token);
     assert(rc == VEC0_TOKEN_RESULT_SOME);
     assert(token.token_type == TOKEN_TYPE_IDENTIFIER);
-    assert(strncmp(token.start, "diskann", 7) == 0);
+    assert(strncmp(token.start, "myindex", 7) == 0);
 
     rc = vec0_scanner_next(&scanner, &token);
     assert(rc == VEC0_TOKEN_RESULT_SOME);
@@ -1344,6 +1345,251 @@ void test_diskann_config_defaults() {
   printf("  All diskann_config_defaults tests passed.\n");
 }
 
+// ============================================================
+// Annoy tests
+// ============================================================
+
+void test_annoy_config_defaults() {
+  printf("Starting %s...\n", __func__);
+  struct VectorColumnDefinition col;
+  memset(&col, 0, sizeof(col));
+
+  // Verify parsing a normal vector column has annoy disabled
+  {
+    const char *input = "embedding float[768]";
+    int rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == 0 /* SQLITE_OK */);
+    assert(col.index_type != VEC0_INDEX_TYPE_ANNOY);
+    assert(col.annoy.n_trees == 0);
+    assert(col.annoy.search_k == 0);
+    sqlite3_free(col.name);
+  }
+
+  // Verify parsing a normal column with distance_metric has annoy disabled
+  {
+    const char *input = "emb float[128] distance_metric=cosine";
+    int rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == 0 /* SQLITE_OK */);
+    assert(col.index_type != VEC0_INDEX_TYPE_ANNOY);
+    sqlite3_free(col.name);
+  }
+
+  printf("  All annoy_config_defaults tests passed.\n");
+}
+
+void test_vec0_parse_vector_column_annoy() {
+  printf("Starting %s...\n", __func__);
+  struct VectorColumnDefinition col;
+  int rc;
+
+  // Basic annoy with defaults
+  {
+    const char *input = "embedding float[768] INDEXED BY annoy()";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == 0 /* SQLITE_OK */);
+    assert(col.index_type == VEC0_INDEX_TYPE_ANNOY);
+    assert(col.annoy.n_trees == 50);
+    assert(col.annoy.search_k == 0);
+    assert(col.dimensions == 768);
+    sqlite3_free(col.name);
+  }
+
+  // Custom n_trees
+  {
+    const char *input = "emb float[384] INDEXED BY annoy(n_trees=100)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == 0 /* SQLITE_OK */);
+    assert(col.index_type == VEC0_INDEX_TYPE_ANNOY);
+    assert(col.annoy.n_trees == 100);
+    assert(col.annoy.search_k == 0);
+    sqlite3_free(col.name);
+  }
+
+  // Custom search_k
+  {
+    const char *input = "emb float[384] INDEXED BY annoy(n_trees=10, search_k=500)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == 0 /* SQLITE_OK */);
+    assert(col.index_type == VEC0_INDEX_TYPE_ANNOY);
+    assert(col.annoy.n_trees == 10);
+    assert(col.annoy.search_k == 500);
+    sqlite3_free(col.name);
+  }
+
+  // With distance_metric
+  {
+    const char *input = "emb float[768] distance_metric=cosine INDEXED BY annoy(n_trees=25)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == 0 /* SQLITE_OK */);
+    assert(col.index_type == VEC0_INDEX_TYPE_ANNOY);
+    assert(col.annoy.n_trees == 25);
+    assert(col.distance_metric == 2 /* VEC0_DISTANCE_METRIC_COSINE */);
+    sqlite3_free(col.name);
+  }
+
+  // int8 element type
+  {
+    const char *input = "emb int8[768] INDEXED BY annoy(n_trees=50)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == 0 /* SQLITE_OK */);
+    assert(col.index_type == VEC0_INDEX_TYPE_ANNOY);
+    sqlite3_free(col.name);
+  }
+
+  // Error: n_trees too large
+  {
+    const char *input = "emb float[768] INDEXED BY annoy(n_trees=9999)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc != 0);
+  }
+
+  // Error: n_trees = 0
+  {
+    const char *input = "emb float[768] INDEXED BY annoy(n_trees=0)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc != 0);
+  }
+
+  // Error: unknown option
+  {
+    const char *input = "emb float[768] INDEXED BY annoy(bad_option=5)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc != 0);
+  }
+
+  // Error: missing parens
+  {
+    const char *input = "emb float[768] INDEXED BY annoy";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc != 0);
+  }
+
+  printf("  All vec0_parse_vector_column_annoy tests passed.\n");
+}
+
+void test_annoy_node_encode_decode() {
+  printf("Starting %s...\n", __func__);
+
+  // Test split node encode/decode (float32, no quantization)
+  {
+    float split_vec[4] = {1.0f, -0.5f, 0.0f, 0.25f};
+    float query[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    unsigned char *data = NULL;
+    int dataSize = 0;
+    int rc = annoy_encode_split_node(42, 99, split_vec, 4,
+                                      VEC0_ANNOY_QUANTIZER_NONE, &data, &dataSize);
+    assert(rc == 0 /* SQLITE_OK */);
+    assert(dataSize == 2 * 4 + 4 * 4);  // 2 ints + 4 floats = 24 bytes
+    assert(data != NULL);
+
+    int left, right;
+    float margin;
+    rc = annoy_decode_split_node(data, dataSize, 4,
+                                  VEC0_ANNOY_QUANTIZER_NONE,
+                                  &left, &right, query, &margin);
+    assert(rc == 0);
+    assert(left == 42);
+    assert(right == 99);
+    // margin = dot([1,1,1,1], [1,-0.5,0,0.25]) = 1 - 0.5 + 0 + 0.25 = 0.75
+    assert(margin > 0.74f && margin < 0.76f);
+
+    sqlite3_free(data);
+  }
+
+  // Test split node encode/decode with int8 quantization
+  {
+    float split_vec[4] = {1.0f, -0.5f, 0.0f, 0.25f};
+    float query[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    unsigned char *data = NULL;
+    int dataSize = 0;
+    int rc = annoy_encode_split_node(42, 99, split_vec, 4,
+                                      VEC0_ANNOY_QUANTIZER_INT8, &data, &dataSize);
+    assert(rc == 0);
+    assert(dataSize == 2 * 4 + 4 * 1);  // 2 ints + 4 int8s = 12 bytes
+    assert(data != NULL);
+
+    int left, right;
+    float margin;
+    rc = annoy_decode_split_node(data, dataSize, 4,
+                                  VEC0_ANNOY_QUANTIZER_INT8,
+                                  &left, &right, query, &margin);
+    assert(rc == 0);
+    assert(left == 42);
+    assert(right == 99);
+    // Should be approximately 0.75 (with quantization error)
+    assert(margin > 0.5f && margin < 1.0f);
+
+    sqlite3_free(data);
+  }
+
+  // Test split node encode/decode with binary quantization
+  {
+    float split_vec[8] = {1.0f, -0.5f, 0.3f, -0.1f, 0.8f, -0.2f, 0.0f, 0.5f};
+    float query[8] = {1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+    unsigned char *data = NULL;
+    int dataSize = 0;
+    int rc = annoy_encode_split_node(10, 20, split_vec, 8,
+                                      VEC0_ANNOY_QUANTIZER_BINARY, &data, &dataSize);
+    assert(rc == 0);
+    assert(dataSize == 2 * 4 + 1);  // 2 ints + 1 byte (8 bits)
+    assert(data != NULL);
+
+    int left, right;
+    float margin;
+    rc = annoy_decode_split_node(data, dataSize, 8,
+                                  VEC0_ANNOY_QUANTIZER_BINARY,
+                                  &left, &right, query, &margin);
+    assert(rc == 0);
+    assert(left == 10);
+    assert(right == 20);
+    assert(margin > 1.5f && margin < 2.5f);
+
+    sqlite3_free(data);
+  }
+
+  // Test descendants node encode/decode
+  {
+    long long rowids[5] = {10, 20, 30, 40, 50};
+    unsigned char *data = NULL;
+    int dataSize = 0;
+    int rc = annoy_encode_descendants_node(rowids, 5, &data, &dataSize);
+    assert(rc == 0);
+    assert(dataSize == 5 * 8);  // 5 * sizeof(i64)
+    assert(data != NULL);
+
+    const long long *decoded_rowids;
+    int count;
+    rc = annoy_decode_descendants_node(data, dataSize, &decoded_rowids, &count);
+    assert(rc == 0);
+    assert(count == 5);
+    assert(decoded_rowids[0] == 10);
+    assert(decoded_rowids[4] == 50);
+
+    sqlite3_free(data);
+  }
+
+  // Test empty descendants
+  {
+    unsigned char *data = NULL;
+    int dataSize = 0;
+    int rc = annoy_encode_descendants_node(NULL, 0, &data, &dataSize);
+    assert(rc == 0);
+    assert(dataSize == 0);
+    sqlite3_free(data);
+  }
+
+  // Test decode with wrong size
+  {
+    unsigned char buf[3] = {0, 0, 0};  // not divisible by 8
+    const long long *rowids;
+    int count;
+    int rc = annoy_decode_descendants_node(buf, 3, &rowids, &count);
+    assert(rc != 0);  // should error
+  }
+
+  printf("  All annoy_node_encode_decode tests passed.\n");
+}
+
 int main() {
   printf("Starting unit tests...\n");
 #ifdef SQLITE_VEC_ENABLE_AVX
@@ -1371,5 +1617,8 @@ int main() {
   test_diskann_prune_select();
   test_diskann_quantized_vector_byte_size();
   test_diskann_config_defaults();
+  test_annoy_config_defaults();
+  test_vec0_parse_vector_column_annoy();
+  test_annoy_node_encode_decode();
   printf("All unit tests passed.\n");
 }
