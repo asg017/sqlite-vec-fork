@@ -2499,6 +2499,18 @@ static f32 vec0_distance_full(
 
 enum Vec0IndexType {
   VEC0_INDEX_TYPE_FLAT = 1,
+  VEC0_INDEX_TYPE_RESCORE = 2,
+};
+
+enum Vec0RescoreQuantizerType {
+  VEC0_RESCORE_QUANTIZER_BIT = 1,
+  VEC0_RESCORE_QUANTIZER_INT8 = 2,
+};
+
+struct Vec0RescoreConfig {
+  int enabled;
+  enum Vec0RescoreQuantizerType quantizer_type;
+  int oversample;
 };
 
 struct VectorColumnDefinition {
@@ -2508,6 +2520,7 @@ struct VectorColumnDefinition {
   enum VectorElementType element_type;
   enum Vec0DistanceMetrics distance_metric;
   enum Vec0IndexType index_type;
+  struct Vec0RescoreConfig rescore;
 };
 
 struct Vec0PartitionColumnDefinition {
@@ -2545,6 +2558,110 @@ size_t vector_column_byte_size(struct VectorColumnDefinition column) {
 }
 
 /**
+ * @brief Parse rescore options from an "INDEXED BY rescore(...)" clause.
+ *
+ * @param scanner Scanner positioned right after the opening '(' of rescore(...)
+ * @param outConfig Output rescore config
+ * @param pzErr Error message output
+ * @return int SQLITE_OK on success, SQLITE_ERROR on error.
+ */
+static int vec0_parse_rescore_options(struct Vec0Scanner *scanner,
+                                      struct Vec0RescoreConfig *outConfig,
+                                      char **pzErr) {
+  struct Vec0Token token;
+  int rc;
+  int hasQuantizer = 0;
+  outConfig->enabled = 1;
+  outConfig->oversample = 8;
+  outConfig->quantizer_type = 0;
+
+  while (1) {
+    rc = vec0_scanner_next(scanner, &token);
+    if (rc == VEC0_TOKEN_RESULT_EOF) {
+      break;
+    }
+    // ')' closes rescore options
+    if (rc == VEC0_TOKEN_RESULT_SOME && token.token_type == TOKEN_TYPE_RPAREN) {
+      break;
+    }
+    if (rc != VEC0_TOKEN_RESULT_SOME || token.token_type != TOKEN_TYPE_IDENTIFIER) {
+      *pzErr = sqlite3_mprintf("Expected option name in rescore(...)");
+      return SQLITE_ERROR;
+    }
+
+    char *key = token.start;
+    int keyLength = token.end - token.start;
+
+    // expect '='
+    rc = vec0_scanner_next(scanner, &token);
+    if (rc != VEC0_TOKEN_RESULT_SOME || token.token_type != TOKEN_TYPE_EQ) {
+      *pzErr = sqlite3_mprintf("Expected '=' after option name in rescore(...)");
+      return SQLITE_ERROR;
+    }
+
+    // value
+    rc = vec0_scanner_next(scanner, &token);
+    if (rc != VEC0_TOKEN_RESULT_SOME) {
+      *pzErr = sqlite3_mprintf("Expected value after '=' in rescore(...)");
+      return SQLITE_ERROR;
+    }
+
+    if (sqlite3_strnicmp(key, "quantizer", keyLength) == 0) {
+      if (token.token_type != TOKEN_TYPE_IDENTIFIER) {
+        *pzErr = sqlite3_mprintf("Expected identifier for quantizer value in rescore(...)");
+        return SQLITE_ERROR;
+      }
+      int valLen = token.end - token.start;
+      if (sqlite3_strnicmp(token.start, "bit", valLen) == 0) {
+        outConfig->quantizer_type = VEC0_RESCORE_QUANTIZER_BIT;
+      } else if (sqlite3_strnicmp(token.start, "int8", valLen) == 0) {
+        outConfig->quantizer_type = VEC0_RESCORE_QUANTIZER_INT8;
+      } else {
+        *pzErr = sqlite3_mprintf("Unknown quantizer type '%.*s' in rescore(...). Expected 'bit' or 'int8'.", valLen, token.start);
+        return SQLITE_ERROR;
+      }
+      hasQuantizer = 1;
+    } else if (sqlite3_strnicmp(key, "oversample", keyLength) == 0) {
+      if (token.token_type != TOKEN_TYPE_DIGIT) {
+        *pzErr = sqlite3_mprintf("Expected integer for oversample value in rescore(...)");
+        return SQLITE_ERROR;
+      }
+      outConfig->oversample = atoi(token.start);
+      if (outConfig->oversample <= 0 || outConfig->oversample > 128) {
+        *pzErr = sqlite3_mprintf("oversample in rescore(...) must be between 1 and 128, got %d", outConfig->oversample);
+        return SQLITE_ERROR;
+      }
+    } else {
+      *pzErr = sqlite3_mprintf("Unknown option '%.*s' in rescore(...)", keyLength, key);
+      return SQLITE_ERROR;
+    }
+
+    // optional comma between options
+    rc = vec0_scanner_next(scanner, &token);
+    if (rc == VEC0_TOKEN_RESULT_EOF) {
+      break;
+    }
+    if (rc == VEC0_TOKEN_RESULT_SOME && token.token_type == TOKEN_TYPE_RPAREN) {
+      break;
+    }
+    if (rc == VEC0_TOKEN_RESULT_SOME && token.token_type == TOKEN_TYPE_COMMA) {
+      continue;
+    }
+    // If it's not a comma or rparen, it might be the next key — push back isn't
+    // possible with this scanner, so we'll treat unexpected tokens as errors
+    *pzErr = sqlite3_mprintf("Unexpected token in rescore(...) options");
+    return SQLITE_ERROR;
+  }
+
+  if (!hasQuantizer) {
+    *pzErr = sqlite3_mprintf("rescore(...) requires a 'quantizer' option (quantizer=bit or quantizer=int8)");
+    return SQLITE_ERROR;
+  }
+
+  return SQLITE_OK;
+}
+
+/**
  * @brief Parse an vec0 vtab argv[i] column definition and see if
  * it's a vector column defintion, ex `contents_embedding float[768]`.
  *
@@ -2568,6 +2685,8 @@ int vec0_parse_vector_column(const char *source, int source_length,
   enum VectorElementType elementType;
   enum Vec0DistanceMetrics distanceMetric = VEC0_DISTANCE_METRIC_L2;
   enum Vec0IndexType indexType = VEC0_INDEX_TYPE_FLAT;
+  struct Vec0RescoreConfig rescoreConfig;
+  memset(&rescoreConfig, 0, sizeof(rescoreConfig));
   int dimensions;
 
   vec0_scanner_init(&scanner, source, source_length);
@@ -2671,6 +2790,7 @@ int vec0_parse_vector_column(const char *source, int source_length,
         return SQLITE_ERROR;
       }
     }
+    // INDEXED BY flat() | rescore(...)
     else if (sqlite3_strnicmp(key, "indexed", keyLength) == 0) {
       // expect "by"
       rc = vec0_scanner_next(&scanner, &token);
@@ -2700,6 +2820,27 @@ int vec0_parse_vector_column(const char *source, int source_length,
             token.token_type != TOKEN_TYPE_RPAREN) {
           return SQLITE_ERROR;
         }
+      } else if (sqlite3_strnicmp(token.start, "rescore", indexNameLen) == 0) {
+        indexType = VEC0_INDEX_TYPE_RESCORE;
+        if (elementType != SQLITE_VEC_ELEMENT_TYPE_FLOAT32) {
+          return SQLITE_ERROR;
+        }
+        // expect '('
+        rc = vec0_scanner_next(&scanner, &token);
+        if (rc != VEC0_TOKEN_RESULT_SOME || token.token_type != TOKEN_TYPE_LPAREN) {
+          return SQLITE_ERROR;
+        }
+        char *rescoreErr = NULL;
+        rc = vec0_parse_rescore_options(&scanner, &rescoreConfig, &rescoreErr);
+        if (rc != SQLITE_OK) {
+          if (rescoreErr) sqlite3_free(rescoreErr);
+          return SQLITE_ERROR;
+        }
+        // validate dimensions for bit quantizer
+        if (rescoreConfig.quantizer_type == VEC0_RESCORE_QUANTIZER_BIT &&
+            (dimensions % CHAR_BIT) != 0) {
+          return SQLITE_ERROR;
+        }
       } else {
         // unknown index type
         return SQLITE_ERROR;
@@ -2720,6 +2861,7 @@ int vec0_parse_vector_column(const char *source, int source_length,
   outColumn->element_type = elementType;
   outColumn->dimensions = dimensions;
   outColumn->index_type = indexType;
+  outColumn->rescore = rescoreConfig;
   return SQLITE_OK;
 }
 
