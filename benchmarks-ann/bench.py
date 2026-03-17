@@ -216,6 +216,42 @@ INDEX_REGISTRY["ivf"] = {
 
 
 # ============================================================================
+# DiskANN implementation
+# ============================================================================
+
+
+def _diskann_create_table_sql(params):
+    bt = params["buffer_threshold"]
+    extra = f", buffer_threshold={bt}" if bt > 0 else ""
+    return (
+        f"CREATE VIRTUAL TABLE vec_items USING vec0("
+        f"  id integer primary key,"
+        f"  embedding float[768] distance_metric=cosine"
+        f"    INDEXED BY diskann("
+        f"      neighbor_quantizer={params['quantizer']},"
+        f"      n_neighbors={params['R']},"
+        f"      search_list_size={params['L']}"
+        f"      {extra}"
+        f"    )"
+        f")"
+    )
+
+
+def _diskann_describe(params):
+    return f"diskann  q={params['quantizer']:<6} R={params['R']:<3} L={params['L']}"
+
+
+INDEX_REGISTRY["diskann"] = {
+    "defaults": {"R": 72, "L": 128, "quantizer": "binary", "buffer_threshold": 0},
+    "create_table_sql": _diskann_create_table_sql,
+    "insert_sql": None,
+    "post_insert_hook": None,
+    "run_query": None,
+    "describe": _diskann_describe,
+}
+
+
+# ============================================================================
 # Config parsing
 # ============================================================================
 
