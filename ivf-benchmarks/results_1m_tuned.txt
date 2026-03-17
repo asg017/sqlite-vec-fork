@@ -1,0 +1,123 @@
+=== 1M Benchmark (COHERE 768-dim cosine) ===
+
+
+============================================================
+  flat
+============================================================
+    [flat]   200000/1000000  4s  54623 rows/s
+    [flat]   400000/1000000  7s  53484 rows/s
+    [flat]   600000/1000000  11s  52935 rows/s
+    [flat]   800000/1000000  15s  53824 rows/s
+    [flat]  1000000/1000000  19s  53597 rows/s
+  Build: 18.7s  (2955 MB)
+  KNN (k=10, n=50)...
+      query 10/50  mean=344.8ms  recall=1.000
+      query 20/50  mean=340.7ms  recall=1.000
+      query 30/50  mean=342.2ms  recall=1.000
+      query 40/50  mean=346.3ms  recall=1.000
+      query 50/50  mean=351.0ms  recall=1.000
+  => 351.0ms  recall=1.0
+
+============================================================
+  int8(oversample=4)
+============================================================
+    [int8(oversample=4)]   200000/1000000  3s  58109 rows/s
+    [int8(oversample=4)]   400000/1000000  7s  55485 rows/s
+    [int8(oversample=4)]   600000/1000000  13s  47724 rows/s
+    [int8(oversample=4)]   800000/1000000  17s  46043 rows/s
+    [int8(oversample=4)]  1000000/1000000  23s  43978 rows/s
+  Build: 22.7s  (3689 MB)
+  KNN (k=10, n=50)...
+      query 10/50  mean=242.9ms  recall=0.980
+      query 20/50  mean=343.6ms  recall=0.990
+      query 30/50  mean=294.8ms  recall=0.993
+      query 40/50  mean=269.1ms  recall=0.993
+      query 50/50  mean=254.5ms  recall=0.994
+  => 254.5ms  recall=0.994
+
+============================================================
+  bit(oversample=8)
+============================================================
+    [bit(oversample=8)]   200000/1000000  4s  53760 rows/s
+    [bit(oversample=8)]   400000/1000000  8s  52036 rows/s
+    [bit(oversample=8)]   600000/1000000  11s  52436 rows/s
+    [bit(oversample=8)]   800000/1000000  15s  52499 rows/s
+    [bit(oversample=8)]  1000000/1000000  20s  51190 rows/s
+  Build: 19.5s  (3048 MB)
+  KNN (k=10, n=50)...
+      query 10/50  mean=111.0ms  recall=0.900
+      query 20/50  mean=105.4ms  recall=0.920
+      query 30/50  mean=103.4ms  recall=0.930
+      query 40/50  mean=99.1ms  recall=0.920
+      query 50/50  mean=96.2ms  recall=0.918
+  => 96.2ms  recall=0.918
+
+============================================================
+  ivf(nlist=128,nprobe=16) (train=8192)
+============================================================
+  Training k-means (nlist=128)...
+  Train: 8.6s
+      200000/991808  17s  12104 rows/s
+      400000/991808  40s  10105 rows/s
+      600000/991808  72s  8335 rows/s
+      800000/991808  114s  6996 rows/s
+      991808/991808  163s  6095 rows/s
+  Build: 163.0s insert + 8.6s train  (2995 MB)
+  KNN (k=10, n=50)...
+      query 10/50  mean=442.3ms  recall=1.000
+      query 20/50  mean=320.7ms  recall=1.000
+      query 30/50  mean=255.9ms  recall=0.997
+      query 40/50  mean=227.8ms  recall=0.995
+      query 50/50  mean=221.0ms  recall=0.996
+  => 221.0ms  recall=0.996
+
+============================================================
+  ivf(nlist=1000,nprobe=8) (train=64000)
+============================================================
+  Training k-means (nlist=1000)...
+  Train: 520.5s
+      200000/936000  95s  2100 rows/s
+      400000/936000  192s  2079 rows/s
+      600000/936000  291s  2059 rows/s
+      800000/936000  396s  2019 rows/s
+      936000/936000  470s  1991 rows/s
+  Build: 473.8s insert + 520.5s train  (3092 MB)
+  KNN (k=10, n=50)...
+      query 10/50  mean=56.9ms  recall=0.890
+      query 20/50  mean=58.5ms  recall=0.895
+      query 30/50  mean=62.8ms  recall=0.850
+      query 40/50  mean=62.5ms  recall=0.840
+      query 50/50  mean=60.7ms  recall=0.828
+  => 60.7ms  recall=0.828
+
+============================================================
+  ivf(nlist=1000,nprobe=16) (train=64000)
+============================================================
+  Training k-means (nlist=1000)...
+  Train: 523.4s
+      200000/936000  95s  2114 rows/s
+      400000/936000  191s  2096 rows/s
+      600000/936000  290s  2071 rows/s
+      800000/936000  392s  2038 rows/s
+      936000/936000  464s  2017 rows/s
+  Build: 467.4s insert + 523.4s train  (3092 MB)
+  KNN (k=10, n=50)...
+      query 10/50  mean=74.1ms  recall=0.920
+      query 20/50  mean=75.7ms  recall=0.935
+      query 30/50  mean=78.0ms  recall=0.913
+      query 40/50  mean=77.7ms  recall=0.915
+      query 50/50  mean=72.9ms  recall=0.910
+  => 72.9ms  recall=0.91
+
+
+=====================================================================================
+RESULTS — 1,000,000 vectors, COHERE 768-dim cosine, k=10
+=====================================================================================
+                            name   insert   train     MB  qry(ms)   recall
+-----------------------------------------------------------------------------
+                            flat    18.7s       -   2955    351.0   1.0000
+              int8(oversample=4)    22.7s       -   3689    254.5   0.9940
+               bit(oversample=8)    19.5s       -   3048     96.2   0.9180
+        ivf(nlist=128,nprobe=16)   163.0s      9s   2995    221.0   0.9960
+        ivf(nlist=1000,nprobe=8)   473.8s    520s   3092     60.7   0.8280
+       ivf(nlist=1000,nprobe=16)   467.4s    523s   3092     72.9   0.9100

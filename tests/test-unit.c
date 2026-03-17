@@ -577,6 +577,173 @@ void test_vec0_parse_vector_column() {
     assert(rc == SQLITE_ERROR);
   }
 
+  // IVF: indexed by ivf() — defaults
+  {
+    const char *input = "v float[4] indexed by ivf()";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == SQLITE_OK);
+    assert(col.index_type == VEC0_INDEX_TYPE_IVF);
+    assert(col.dimensions == 4);
+    assert(col.index_type == VEC0_INDEX_TYPE_IVF);
+    assert(col.ivf.nlist == 128);  // default
+    assert(col.ivf.nprobe == 10);  // default
+    sqlite3_free(col.name);
+  }
+
+  // IVF: indexed by ivf(nlist=8) — nprobe auto-clamped to 8
+  {
+    const char *input = "v float[4] indexed by ivf(nlist=8)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == SQLITE_OK);
+    assert(col.index_type == VEC0_INDEX_TYPE_IVF);
+    assert(col.index_type == VEC0_INDEX_TYPE_IVF);
+    assert(col.ivf.nlist == 8);
+    assert(col.ivf.nprobe == 8);  // clamped from default 10
+    sqlite3_free(col.name);
+  }
+
+  // IVF: indexed by ivf(nlist=64, nprobe=8)
+  {
+    const char *input = "v float[4] indexed by ivf(nlist=64, nprobe=8)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == SQLITE_OK);
+    assert(col.index_type == VEC0_INDEX_TYPE_IVF);
+    assert(col.ivf.nlist == 64);
+    assert(col.ivf.nprobe == 8);
+    sqlite3_free(col.name);
+  }
+
+  // IVF: with distance_metric before indexed by
+  {
+    const char *input = "v float[4] distance_metric=cosine indexed by ivf(nlist=16)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == SQLITE_OK);
+    assert(col.index_type == VEC0_INDEX_TYPE_IVF);
+    assert(col.distance_metric == VEC0_DISTANCE_METRIC_COSINE);
+    assert(col.index_type == VEC0_INDEX_TYPE_IVF);
+    assert(col.ivf.nlist == 16);
+    sqlite3_free(col.name);
+  }
+
+  // IVF: nlist=0 (deferred)
+  {
+    const char *input = "v float[4] indexed by ivf(nlist=0)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == SQLITE_OK);
+    assert(col.ivf.nlist == 0);
+    sqlite3_free(col.name);
+  }
+
+  // IVF error: nprobe > nlist
+  {
+    const char *input = "v float[4] indexed by ivf(nlist=4, nprobe=10)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == SQLITE_ERROR);
+  }
+
+  // IVF error: unknown key
+  {
+    const char *input = "v float[4] indexed by ivf(bogus=1)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == SQLITE_ERROR);
+  }
+
+  // IVF error: unknown index type (hnsw not supported)
+  {
+    const char *input = "v float[4] indexed by hnsw()";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == SQLITE_ERROR);
+  }
+
+  // Not IVF: no ivf config
+  {
+    const char *input = "v float[4]";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == SQLITE_OK);
+    assert(col.index_type == VEC0_INDEX_TYPE_FLAT);
+    sqlite3_free(col.name);
+  }
+
+  // IVF: quantizer=binary
+  {
+    const char *input = "v float[768] indexed by ivf(nlist=128, quantizer=binary)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == SQLITE_OK);
+    assert(col.index_type == VEC0_INDEX_TYPE_IVF);
+    assert(col.ivf.nlist == 128);
+    assert(col.ivf.quantizer == VEC0_IVF_QUANTIZER_BINARY);
+    assert(col.ivf.oversample == 1);
+    sqlite3_free(col.name);
+  }
+
+  // IVF: quantizer=int8
+  {
+    const char *input = "v float[768] indexed by ivf(nlist=64, quantizer=int8)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == SQLITE_OK);
+    assert(col.ivf.quantizer == VEC0_IVF_QUANTIZER_INT8);
+    sqlite3_free(col.name);
+  }
+
+  // IVF: quantizer=none (explicit)
+  {
+    const char *input = "v float[768] indexed by ivf(quantizer=none)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == SQLITE_OK);
+    assert(col.ivf.quantizer == VEC0_IVF_QUANTIZER_NONE);
+    sqlite3_free(col.name);
+  }
+
+  // IVF: oversample=10 with quantizer
+  {
+    const char *input = "v float[768] indexed by ivf(nlist=128, quantizer=binary, oversample=10)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == SQLITE_OK);
+    assert(col.ivf.quantizer == VEC0_IVF_QUANTIZER_BINARY);
+    assert(col.ivf.oversample == 10);
+    assert(col.ivf.nlist == 128);
+    sqlite3_free(col.name);
+  }
+
+  // IVF: all params
+  {
+    const char *input = "v float[768] distance_metric=cosine indexed by ivf(nlist=256, nprobe=16, quantizer=int8, oversample=4)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == SQLITE_OK);
+    assert(col.distance_metric == VEC0_DISTANCE_METRIC_COSINE);
+    assert(col.ivf.nlist == 256);
+    assert(col.ivf.nprobe == 16);
+    assert(col.ivf.quantizer == VEC0_IVF_QUANTIZER_INT8);
+    assert(col.ivf.oversample == 4);
+    sqlite3_free(col.name);
+  }
+
+  // IVF error: oversample > 1 without quantizer
+  {
+    const char *input = "v float[768] indexed by ivf(oversample=10)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == SQLITE_ERROR);
+  }
+
+  // IVF error: unknown quantizer value
+  {
+    const char *input = "v float[768] indexed by ivf(quantizer=pq)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == SQLITE_ERROR);
+  }
+
+  // IVF: quantizer with defaults (nlist=128 default, nprobe=10 default)
+  {
+    const char *input = "v float[768] indexed by ivf(quantizer=binary, oversample=5)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == SQLITE_OK);
+    assert(col.ivf.nlist == 128);
+    assert(col.ivf.nprobe == 10);
+    assert(col.ivf.quantizer == VEC0_IVF_QUANTIZER_BINARY);
+    assert(col.ivf.oversample == 5);
+    sqlite3_free(col.name);
+  }
+
   printf("  All vec0_parse_vector_column tests passed.\n");
 }
 
