@@ -68,6 +68,30 @@ enum Vec0IndexType {
 #ifdef SQLITE_VEC_ENABLE_RESCORE
   VEC0_INDEX_TYPE_RESCORE = 2,
 #endif
+  VEC0_INDEX_TYPE_IVF = 3,
+};
+
+enum Vec0RescoreQuantizerType {
+  VEC0_RESCORE_QUANTIZER_BIT = 1,
+  VEC0_RESCORE_QUANTIZER_INT8 = 2,
+};
+
+struct Vec0RescoreConfig {
+  enum Vec0RescoreQuantizerType quantizer_type;
+  int oversample;
+};
+
+enum Vec0IvfQuantizer {
+  VEC0_IVF_QUANTIZER_NONE = 0,
+  VEC0_IVF_QUANTIZER_INT8 = 1,
+  VEC0_IVF_QUANTIZER_BINARY = 2,
+};
+
+struct Vec0IvfConfig {
+  int nlist;
+  int nprobe;
+  int quantizer;
+  int oversample;
 };
 
 #ifdef SQLITE_VEC_ENABLE_RESCORE
@@ -92,6 +116,7 @@ struct VectorColumnDefinition {
 #ifdef SQLITE_VEC_ENABLE_RESCORE
   struct Vec0RescoreConfig rescore;
 #endif
+  struct Vec0IvfConfig ivf;
 };
 
 int vec0_parse_vector_column(const char *source, int source_length,

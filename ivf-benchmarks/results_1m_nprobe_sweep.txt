@@ -1,0 +1,42 @@
+=== nprobe sweep: N=1,000,000, nlist=1000, train=16000 ===
+
+  Inserting 16000 training vectors...
+  Training k-means (nlist=1000)...
+  Train: 130.3s
+  Inserting 984000 remaining vectors...
+      100000/984000  45s  2219 rows/s
+      200000/984000  91s  2209 rows/s
+      300000/984000  138s  2179 rows/s
+      400000/984000  186s  2145 rows/s
+      500000/984000  238s  2104 rows/s
+      600000/984000  288s  2083 rows/s
+      700000/984000  341s  2051 rows/s
+      800000/984000  393s  2036 rows/s
+      900000/984000  446s  2020 rows/s
+      984000/984000  492s  1999 rows/s
+  Build done: 492.6s insert + 130.3s train  (3101 MB)
+
+  nprobe=1        26.6ms  recall=0.5040
+  nprobe=2        40.5ms  recall=0.6700
+  nprobe=4        64.9ms  recall=0.8060
+  nprobe=8        98.6ms  recall=0.8900
+  nprobe=16      161.1ms  recall=0.9500
+  nprobe=32      212.1ms  recall=0.9800
+  nprobe=64      252.0ms  recall=0.9980
+  nprobe=128     764.8ms  recall=1.0000
+  nprobe=256     604.9ms  recall=1.0000
+
+==================================================
+N=1,000,000  nlist=1000  train=16000
+==================================================
+  nprobe  qry(ms)   recall
+----------------------------
+       1     26.6   0.5040
+       2     40.5   0.6700
+       4     64.9   0.8060
+       8     98.6   0.8900
+      16    161.1   0.9500
+      32    212.1   0.9800
+      64    252.0   0.9980
+     128    764.8   1.0000
+     256    604.9   1.0000
