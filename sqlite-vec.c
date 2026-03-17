@@ -2281,6 +2281,42 @@ enum Vec0DistanceMetrics {
   VEC0_DISTANCE_METRIC_L1 = 3,
 };
 
+/**
+ * Compute distance between two full-precision vectors using the appropriate
+ * distance function for the given element type and metric.
+ * Shared utility used by ANN index implementations.
+ */
+static f32 vec0_distance_full(
+    const void *a, const void *b, size_t dimensions,
+    enum VectorElementType elementType,
+    enum Vec0DistanceMetrics metric) {
+  switch (elementType) {
+    case SQLITE_VEC_ELEMENT_TYPE_FLOAT32:
+      switch (metric) {
+        case VEC0_DISTANCE_METRIC_L2:
+          return distance_l2_sqr_float(a, b, &dimensions);
+        case VEC0_DISTANCE_METRIC_COSINE:
+          return distance_cosine_float(a, b, &dimensions);
+        case VEC0_DISTANCE_METRIC_L1:
+          return (f32)distance_l1_f32(a, b, &dimensions);
+      }
+      break;
+    case SQLITE_VEC_ELEMENT_TYPE_INT8:
+      switch (metric) {
+        case VEC0_DISTANCE_METRIC_L2:
+          return distance_l2_sqr_int8(a, b, &dimensions);
+        case VEC0_DISTANCE_METRIC_COSINE:
+          return distance_cosine_int8(a, b, &dimensions);
+        case VEC0_DISTANCE_METRIC_L1:
+          return (f32)distance_l1_int8(a, b, &dimensions);
+      }
+      break;
+    case SQLITE_VEC_ELEMENT_TYPE_BIT:
+      return distance_hamming(a, b, &dimensions);
+  }
+  return 0.0f;
+}
+
 struct VectorColumnDefinition {
   char *name;
   int name_length;
