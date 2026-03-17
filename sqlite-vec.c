@@ -3959,6 +3959,12 @@ struct vec0_vtab {
   // Must be freed with sqlite3_free()
   char *shadowRescoreChunksNames[VEC0_MAX_VECTOR_COLUMNS];
 
+  // Name of all rescore vector shadow tables, ie `_rescore_vectors00`
+  // Rowid-keyed table for fast random-access float vector reads during rescore.
+  // Only populated for vector columns with rescore enabled.
+  // Must be freed with sqlite3_free()
+  char *shadowRescoreVectorsNames[VEC0_MAX_VECTOR_COLUMNS];
+
   // Name of all metadata chunk shadow tables, ie `_metadatachunks00`
   // Only the first numMetadataColumns entries will be available.
   // The first numMetadataColumns entries must be freed with sqlite3_free()
@@ -4034,8 +4040,8 @@ static int rescore_create_tables(vec0_vtab *p, sqlite3 *db, char **pzErr);
 static int rescore_drop_tables(vec0_vtab *p);
 static int rescore_new_chunk(vec0_vtab *p, i64 chunk_rowid);
 static int rescore_on_insert(vec0_vtab *p, i64 chunk_rowid, i64 chunk_offset,
-                             void *vectorDatas[]);
-static int rescore_on_delete(vec0_vtab *p, i64 chunk_id, u64 chunk_offset);
+                             i64 rowid, void *vectorDatas[]);
+static int rescore_on_delete(vec0_vtab *p, i64 chunk_id, u64 chunk_offset, i64 rowid);
 static int rescore_delete_chunk(vec0_vtab *p, i64 chunk_id);
 
 /**
@@ -4079,6 +4085,9 @@ void vec0_free(vec0_vtab *p) {
 
     sqlite3_free(p->shadowRescoreChunksNames[i]);
     p->shadowRescoreChunksNames[i] = NULL;
+
+    sqlite3_free(p->shadowRescoreVectorsNames[i]);
+    p->shadowRescoreVectorsNames[i] = NULL;
 
     sqlite3_free(p->vector_columns[i].name);
     p->vector_columns[i].name = NULL;
@@ -4371,6 +4380,39 @@ int vec0_get_vector_data(vec0_vtab *pVtab, i64 rowid, int vector_column_idx,
   sqlite3_blob *vectorBlob = NULL;
   assert((vector_column_idx >= 0) &&
          (vector_column_idx < pVtab->numVectorColumns));
+
+  // Rescore columns store float vectors in _rescore_vectors (rowid-keyed)
+  if (p->vector_columns[vector_column_idx].rescore.enabled) {
+    size = vector_column_byte_size(p->vector_columns[vector_column_idx]);
+    rc = sqlite3_blob_open(p->db, p->schemaName,
+                           p->shadowRescoreVectorsNames[vector_column_idx],
+                           "vector", rowid, 0, &vectorBlob);
+    if (rc != SQLITE_OK) {
+      vtab_set_error(&pVtab->base,
+                     "Could not fetch vector data for %lld from rescore vectors",
+                     rowid);
+      rc = SQLITE_ERROR;
+      goto cleanup;
+    }
+    buf = sqlite3_malloc(size);
+    if (!buf) {
+      rc = SQLITE_NOMEM;
+      goto cleanup;
+    }
+    rc = sqlite3_blob_read(vectorBlob, buf, size, 0);
+    if (rc != SQLITE_OK) {
+      sqlite3_free(buf);
+      buf = NULL;
+      rc = SQLITE_ERROR;
+      goto cleanup;
+    }
+    *outVector = buf;
+    if (outVectorSize) {
+      *outVectorSize = size;
+    }
+    rc = SQLITE_OK;
+    goto cleanup;
+  }
 
   rc = vec0_get_chunk_position(pVtab, rowid, NULL, &chunk_id, &chunk_offset);
   if (rc == SQLITE_EMPTY) {
@@ -4975,6 +5017,12 @@ int vec0_new_chunk(vec0_vtab *p, sqlite3_value ** partitionKeyValues, i64 *chunk
       continue;
     }
     int vector_column_idx = p->user_column_idxs[i];
+
+    // Rescore columns don't use _vector_chunks for float storage
+    if (p->vector_columns[vector_column_idx].rescore.enabled) {
+      continue;
+    }
+
     i64 vectorsSize =
         p->chunk_size * vector_column_byte_size(p->vector_columns[vector_column_idx]);
 
@@ -5468,6 +5516,11 @@ static int vec0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
       if (!pNew->shadowRescoreChunksNames[i]) {
         goto error;
       }
+      pNew->shadowRescoreVectorsNames[i] =
+          sqlite3_mprintf("%s_rescore_vectors%02d", tableName, i);
+      if (!pNew->shadowRescoreVectorsNames[i]) {
+        goto error;
+      }
     }
   }
   for (int i = 0; i < pNew->numMetadataColumns; i++) {
@@ -5592,6 +5645,9 @@ static int vec0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
     sqlite3_finalize(stmt);
 
     for (int i = 0; i < pNew->numVectorColumns; i++) {
+      // Rescore columns don't use _vector_chunks
+      if (pNew->vector_columns[i].rescore.enabled)
+        continue;
       char *zSql = sqlite3_mprintf(VEC0_SHADOW_VECTOR_N_CREATE,
                                    pNew->schemaName, pNew->tableName, i);
       if (!zSql) {
@@ -5749,6 +5805,8 @@ static int vec0Destroy(sqlite3_vtab *pVtab) {
   sqlite3_finalize(stmt);
 
   for (int i = 0; i < p->numVectorColumns; i++) {
+    if (p->vector_columns[i].rescore.enabled)
+      continue;
     zSql = sqlite3_mprintf("DROP TABLE \"%w\".\"%w\"", p->schemaName,
                            p->shadowVectorChunksNames[i]);
     rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, 0);
@@ -8597,6 +8655,10 @@ int vec0Update_InsertWriteFinalStep(vec0_vtab *p, i64 chunk_rowid,
 
   // Go insert the vector data into the vector chunk shadow tables
   for (int i = 0; i < p->numVectorColumns; i++) {
+    // Rescore columns store float vectors in _rescore_vectors instead
+    if (p->vector_columns[i].rescore.enabled)
+      continue;
+
     sqlite3_blob *blobVectors;
     rc = sqlite3_blob_open(p->db, p->schemaName, p->shadowVectorChunksNames[i],
                            "vectors", chunk_rowid, 1, &blobVectors);
@@ -8999,7 +9061,7 @@ int vec0Update_Insert(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv,
     goto cleanup;
   }
 
-  rc = rescore_on_insert(p, chunk_rowid, chunk_offset, vectorDatas);
+  rc = rescore_on_insert(p, chunk_rowid, chunk_offset, rowid, vectorDatas);
   if (rc != SQLITE_OK) {
     goto cleanup;
   }
@@ -9194,6 +9256,9 @@ int vec0Update_Delete_ClearVectors(vec0_vtab *p, i64 chunk_id,
                                     u64 chunk_offset) {
   int rc, brc;
   for (int i = 0; i < p->numVectorColumns; i++) {
+    // Rescore columns don't use _vector_chunks
+    if (p->vector_columns[i].rescore.enabled)
+      continue;
     sqlite3_blob *blobVectors = NULL;
     size_t n = vector_column_byte_size(p->vector_columns[i]);
 
@@ -9305,6 +9370,8 @@ int vec0Update_Delete_DeleteChunkIfEmpty(vec0_vtab *p, i64 chunk_id,
 
   // Delete from each _vector_chunksNN
   for (int i = 0; i < p->numVectorColumns; i++) {
+    if (p->vector_columns[i].rescore.enabled)
+      continue;
     zSql = sqlite3_mprintf(
         "DELETE FROM " VEC0_SHADOW_VECTOR_N_NAME " WHERE rowid = ?",
         p->schemaName, p->tableName, i);
@@ -9532,8 +9599,8 @@ int vec0Update_Delete(sqlite3_vtab *pVTab, sqlite3_value *idValue) {
     return rc;
   }
 
-  // 4b. zero out quantized data in rescore chunk tables
-  rc = rescore_on_delete(p, chunk_id, chunk_offset);
+  // 4b. zero out quantized data in rescore chunk tables, delete from rescore vectors
+  rc = rescore_on_delete(p, chunk_id, chunk_offset, rowid);
   if (rc != SQLITE_OK) {
     return rc;
   }
