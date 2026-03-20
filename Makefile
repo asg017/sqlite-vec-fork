@@ -42,6 +42,11 @@ ifndef OMIT_SIMD
 	ifeq ($(shell uname -sm),Darwin arm64)
 	CFLAGS += -mcpu=apple-m1 -DSQLITE_VEC_ENABLE_NEON
 	endif
+	ifeq ($(shell uname -s),Linux)
+	ifneq ($(filter avx,$(shell grep -o 'avx[^ ]*' /proc/cpuinfo 2>/dev/null | head -1)),)
+	CFLAGS += -mavx -DSQLITE_VEC_ENABLE_AVX
+	endif
+	endif
 endif
 
 ifdef USE_BREW_SQLITE
