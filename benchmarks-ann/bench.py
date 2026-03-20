@@ -315,14 +315,22 @@ def measure_knn(db_path, ext_path, base_db, params, subset_size, k=10, n=50):
         times_ms.append(elapsed_ms)
         result_ids = set(r[0] for r in results)
 
-        # Brute-force ground truth over the subset
-        gt_rows = conn.execute(
-            "SELECT id FROM ("
-            "  SELECT id, vec_distance_cosine(vector, :query) as dist "
-            "  FROM base.train WHERE id < :n ORDER BY dist LIMIT :k"
-            ")",
-            {"query": query, "k": k, "n": subset_size},
-        ).fetchall()
+        # Ground truth: use pre-computed neighbors table for full dataset,
+        # otherwise brute-force over the subset
+        if subset_size >= 1000000:
+            gt_rows = conn.execute(
+                "SELECT CAST(neighbors_id AS INTEGER) FROM base.neighbors "
+                "WHERE query_vector_id = :qid AND rank < :k",
+                {"qid": qid, "k": k},
+            ).fetchall()
+        else:
+            gt_rows = conn.execute(
+                "SELECT id FROM ("
+                "  SELECT id, vec_distance_cosine(vector, :query) as dist "
+                "  FROM base.train WHERE id < :n ORDER BY dist LIMIT :k"
+                ")",
+                {"query": query, "k": k, "n": subset_size},
+            ).fetchall()
         gt_ids = set(r[0] for r in gt_rows)
 
         if gt_ids:
