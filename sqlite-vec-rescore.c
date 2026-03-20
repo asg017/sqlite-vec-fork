@@ -15,7 +15,7 @@
 
 static int rescore_create_tables(vec0_vtab *p, sqlite3 *db, char **pzErr) {
   for (int i = 0; i < p->numVectorColumns; i++) {
-    if (!p->vector_columns[i].rescore.enabled)
+    if (p->vector_columns[i].index_type != VEC0_INDEX_TYPE_RESCORE)
       continue;
 
     // Quantized chunk table (same layout as _vector_chunks)
@@ -111,7 +111,7 @@ static size_t rescore_quantized_byte_size(struct VectorColumnDefinition *col) {
  */
 static int rescore_new_chunk(vec0_vtab *p, i64 chunk_rowid) {
   for (int i = 0; i < p->numVectorColumns; i++) {
-    if (!p->vector_columns[i].rescore.enabled)
+    if (p->vector_columns[i].index_type != VEC0_INDEX_TYPE_RESCORE)
       continue;
     size_t quantized_size =
         rescore_quantized_byte_size(&p->vector_columns[i]);
@@ -185,7 +185,7 @@ static void rescore_quantize_float_to_int8(const float *src, int8_t *dst,
 static int rescore_on_insert(vec0_vtab *p, i64 chunk_rowid, i64 chunk_offset,
                              i64 rowid, void *vectorDatas[]) {
   for (int i = 0; i < p->numVectorColumns; i++) {
-    if (!p->vector_columns[i].rescore.enabled)
+    if (p->vector_columns[i].index_type != VEC0_INDEX_TYPE_RESCORE)
       continue;
 
     struct VectorColumnDefinition *col = &p->vector_columns[i];
@@ -262,7 +262,7 @@ static int rescore_on_insert(vec0_vtab *p, i64 chunk_rowid, i64 chunk_offset,
 static int rescore_on_delete(vec0_vtab *p, i64 chunk_id, u64 chunk_offset,
                              i64 rowid) {
   for (int i = 0; i < p->numVectorColumns; i++) {
-    if (!p->vector_columns[i].rescore.enabled)
+    if (p->vector_columns[i].index_type != VEC0_INDEX_TYPE_RESCORE)
       continue;
     int rc;
 
