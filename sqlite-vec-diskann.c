@@ -169,46 +169,63 @@ int diskann_quantize_vector(
  * Compute approximate distance between a full-precision query vector and a
  * quantized neighbor vector. Used during graph traversal.
  */
+/**
+ * Compute distance between a pre-quantized query and a quantized neighbor.
+ * The caller is responsible for quantizing the query vector once and passing
+ * the result here for each neighbor comparison.
+ */
+static f32 diskann_distance_quantized_precomputed(
+    const u8 *query_quantized, const u8 *quantized_neighbor,
+    size_t dimensions,
+    enum Vec0DiskannQuantizerType quantizer_type,
+    enum Vec0DistanceMetrics distance_metric) {
+
+  switch (quantizer_type) {
+    case VEC0_DISKANN_QUANTIZER_BINARY:
+      return distance_hamming(query_quantized, quantized_neighbor, &dimensions);
+    case VEC0_DISKANN_QUANTIZER_INT8: {
+      switch (distance_metric) {
+        case VEC0_DISTANCE_METRIC_L2:
+          return distance_l2_sqr_int8(query_quantized, quantized_neighbor, &dimensions);
+        case VEC0_DISTANCE_METRIC_COSINE:
+          return distance_cosine_int8(query_quantized, quantized_neighbor, &dimensions);
+        case VEC0_DISTANCE_METRIC_L1:
+          return (f32)distance_l1_int8(query_quantized, quantized_neighbor, &dimensions);
+      }
+      break;
+    }
+  }
+  return FLT_MAX;
+}
+
+/**
+ * Quantize a float query vector. Returns allocated buffer (caller must free).
+ */
+static u8 *diskann_quantize_query(
+    const f32 *query_vector, size_t dimensions,
+    enum Vec0DiskannQuantizerType quantizer_type) {
+  size_t qsize = diskann_quantized_vector_byte_size(quantizer_type, dimensions);
+  u8 *buf = sqlite3_malloc(qsize);
+  if (!buf) return NULL;
+  diskann_quantize_vector(query_vector, dimensions, quantizer_type, buf);
+  return buf;
+}
+
+/**
+ * Legacy wrapper: quantizes on-the-fly (used by callers that don't pre-quantize).
+ */
 f32 diskann_distance_quantized(
     const void *query_vector, const u8 *quantized_neighbor,
     size_t dimensions,
     enum Vec0DiskannQuantizerType quantizer_type,
     enum Vec0DistanceMetrics distance_metric) {
 
-  switch (quantizer_type) {
-    case VEC0_DISKANN_QUANTIZER_BINARY: {
-      size_t qsize = dimensions / CHAR_BIT;
-      u8 *query_binary = sqlite3_malloc(qsize);
-      if (!query_binary) return FLT_MAX;
-      diskann_quantize_vector((const f32 *)query_vector, dimensions,
-                               VEC0_DISKANN_QUANTIZER_BINARY, query_binary);
-      f32 dist = distance_hamming(query_binary, quantized_neighbor, &dimensions);
-      sqlite3_free(query_binary);
-      return dist;
-    }
-    case VEC0_DISKANN_QUANTIZER_INT8: {
-      size_t qsize = dimensions * sizeof(i8);
-      i8 *query_int8 = sqlite3_malloc(qsize);
-      if (!query_int8) return FLT_MAX;
-      diskann_quantize_vector((const f32 *)query_vector, dimensions,
-                               VEC0_DISKANN_QUANTIZER_INT8, (u8 *)query_int8);
-      f32 dist = FLT_MAX;
-      switch (distance_metric) {
-        case VEC0_DISTANCE_METRIC_L2:
-          dist = distance_l2_sqr_int8(query_int8, quantized_neighbor, &dimensions);
-          break;
-        case VEC0_DISTANCE_METRIC_COSINE:
-          dist = distance_cosine_int8(query_int8, quantized_neighbor, &dimensions);
-          break;
-        case VEC0_DISTANCE_METRIC_L1:
-          dist = (f32)distance_l1_int8(query_int8, quantized_neighbor, &dimensions);
-          break;
-      }
-      sqlite3_free(query_int8);
-      return dist;
-    }
-  }
-  return FLT_MAX;
+  u8 *query_q = diskann_quantize_query((const f32 *)query_vector, dimensions, quantizer_type);
+  if (!query_q) return FLT_MAX;
+  f32 dist = diskann_distance_quantized_precomputed(
+      query_q, quantized_neighbor, dimensions, quantizer_type, distance_metric);
+  sqlite3_free(query_q);
+  return dist;
 }
 
 // ============================================================
@@ -702,6 +719,13 @@ static int diskann_search(
   // Seed with medoid
   diskann_candidate_list_insert(&candidates, medoid, medoidDist);
 
+  // Pre-quantize query vector once for all quantized distance comparisons
+  u8 *queryQuantized = NULL;
+  if (elementType == SQLITE_VEC_ELEMENT_TYPE_FLOAT32) {
+    queryQuantized = diskann_quantize_query(
+        (const f32 *)queryVector, dimensions, cfg->quantizer_type);
+  }
+
   // 4. Greedy beam search loop (Algorithm 1 from LM-DiskANN paper)
   while (1) {
     int nextIdx = diskann_candidate_list_next_unvisited(&candidates);
@@ -733,9 +757,16 @@ static int diskann_search(
       const u8 *neighborQvec = diskann_neighbor_qvec_get(
           qvecs, i, cfg->quantizer_type, dimensions);
 
-      f32 approxDist = diskann_distance_quantized(
-          queryVector, neighborQvec, dimensions,
-          cfg->quantizer_type, col->distance_metric);
+      f32 approxDist;
+      if (queryQuantized) {
+        approxDist = diskann_distance_quantized_precomputed(
+            queryQuantized, neighborQvec, dimensions,
+            cfg->quantizer_type, col->distance_metric);
+      } else {
+        approxDist = diskann_distance_quantized(
+            queryVector, neighborQvec, dimensions,
+            cfg->quantizer_type, col->distance_metric);
+      }
 
       diskann_candidate_list_insert(&candidates, neighborRowid, approxDist);
     }
@@ -770,6 +801,7 @@ static int diskann_search(
     outDistances[i] = candidates.items[i].distance;
   }
 
+  sqlite3_free(queryQuantized);
   diskann_candidate_list_free(&candidates);
   diskann_visited_set_free(&visited);
   return SQLITE_OK;
@@ -972,6 +1004,13 @@ static int diskann_write_pruned_neighbors(
 
   size_t qvecSize = diskann_quantized_vector_byte_size(
       cfg->quantizer_type, col->dimensions);
+  u8 *qvec = sqlite3_malloc(qvecSize);
+  if (!qvec) {
+    sqlite3_free(validity);
+    sqlite3_free(neighborIds);
+    sqlite3_free(qvecs);
+    return SQLITE_NOMEM;
+  }
 
   for (int i = 0; i < neighborCount && i < cfg->n_neighbors; i++) {
     void *neighborVec = NULL;
@@ -979,12 +1018,6 @@ static int diskann_write_pruned_neighbors(
     rc = diskann_vector_read(p, vec_col_idx, neighborRowids[i],
                               &neighborVec, &neighborVecSize);
     if (rc != SQLITE_OK) continue;
-
-    u8 *qvec = sqlite3_malloc(qvecSize);
-    if (!qvec) {
-      sqlite3_free(neighborVec);
-      continue;
-    }
 
     if (col->element_type == SQLITE_VEC_ELEMENT_TYPE_FLOAT32) {
       diskann_quantize_vector((const f32 *)neighborVec, col->dimensions,
@@ -998,9 +1031,9 @@ static int diskann_write_pruned_neighbors(
                                neighborRowids[i], qvec,
                                cfg->quantizer_type, col->dimensions);
 
-    sqlite3_free(qvec);
     sqlite3_free(neighborVec);
   }
+  sqlite3_free(qvec);
 
   rc = diskann_node_write(p, vec_col_idx, nodeRowid,
                            validity, validitySize,
