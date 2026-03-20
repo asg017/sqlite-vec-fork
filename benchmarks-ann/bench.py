@@ -178,17 +178,6 @@ INDEX_REGISTRY["rescore"] = {
 
 
 def _ivf_create_table_sql(params):
-=======
-# Annoy implementation
-# ============================================================================
-
-
-def _annoy_create_table_sql(params):
-    extra_opts = ""
-    if params["search_k"] > 0:
-        extra_opts += f", search_k={params['search_k']}"
-    if params["quantizer"] != "none":
-        extra_opts += f", quantizer={params['quantizer']}"
     return (
         f"CREATE VIRTUAL TABLE vec_items USING vec0("
         f"  id integer primary key,"
@@ -196,9 +185,6 @@ def _annoy_create_table_sql(params):
         f"    indexed by ivf("
         f"      nlist={params['nlist']},"
         f"      nprobe={params['nprobe']}"
-        f"    INDEXED BY annoy("
-        f"      n_trees={params['n_trees']}"
-        f"      {extra_opts}"
         f"    )"
         f")"
     )
@@ -260,7 +246,32 @@ INDEX_REGISTRY["diskann"] = {
     "post_insert_hook": None,
     "run_query": None,
     "describe": _diskann_describe,
-=======
+}
+
+
+# ============================================================================
+# Annoy implementation
+# ============================================================================
+
+
+def _annoy_create_table_sql(params):
+    extra_opts = ""
+    if params["search_k"] > 0:
+        extra_opts += f", search_k={params['search_k']}"
+    if params["quantizer"] != "none":
+        extra_opts += f", quantizer={params['quantizer']}"
+    return (
+        f"CREATE VIRTUAL TABLE vec_items USING vec0("
+        f"  id integer primary key,"
+        f"  embedding float[768] distance_metric=cosine"
+        f"    INDEXED BY annoy("
+        f"      n_trees={params['n_trees']}"
+        f"      {extra_opts}"
+        f"    )"
+        f")"
+    )
+
+
 def _annoy_post_insert_hook(conn, params):
     print(f"  Building annoy index (n_trees={params['n_trees']})...", flush=True)
     t0 = time.perf_counter()
