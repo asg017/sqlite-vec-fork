@@ -187,15 +187,25 @@ f32 diskann_distance_quantized(
       return dist;
     }
     case VEC0_DISKANN_QUANTIZER_INT8: {
+      size_t qsize = dimensions * sizeof(i8);
+      i8 *query_int8 = sqlite3_malloc(qsize);
+      if (!query_int8) return FLT_MAX;
+      diskann_quantize_vector((const f32 *)query_vector, dimensions,
+                               VEC0_DISKANN_QUANTIZER_INT8, (u8 *)query_int8);
+      f32 dist = FLT_MAX;
       switch (distance_metric) {
         case VEC0_DISTANCE_METRIC_L2:
-          return distance_l2_sqr_int8(query_vector, quantized_neighbor, &dimensions);
+          dist = distance_l2_sqr_int8(query_int8, quantized_neighbor, &dimensions);
+          break;
         case VEC0_DISTANCE_METRIC_COSINE:
-          return distance_cosine_int8(query_vector, quantized_neighbor, &dimensions);
+          dist = distance_cosine_int8(query_int8, quantized_neighbor, &dimensions);
+          break;
         case VEC0_DISTANCE_METRIC_L1:
-          return (f32)distance_l1_int8(query_vector, quantized_neighbor, &dimensions);
+          dist = (f32)distance_l1_int8(query_int8, quantized_neighbor, &dimensions);
+          break;
       }
-      break;
+      sqlite3_free(query_int8);
+      return dist;
     }
   }
   return FLT_MAX;
@@ -284,22 +294,6 @@ static int diskann_medoid_set(vec0_vtab *p, int vec_col_idx,
   return (rc == SQLITE_DONE) ? SQLITE_OK : SQLITE_ERROR;
 }
 
-/**
- * Called during insert. If the graph is currently empty, set the new vector
- * as the medoid. Otherwise, leave the medoid as-is.
- */
-static int diskann_medoid_maybe_set_first(vec0_vtab *p, int vec_col_idx,
-                                            i64 newRowid) {
-  i64 currentMedoid;
-  int isEmpty;
-  int rc = diskann_medoid_get(p, vec_col_idx, &currentMedoid, &isEmpty);
-  if (rc != SQLITE_OK) return rc;
-
-  if (isEmpty) {
-    return diskann_medoid_set(p, vec_col_idx, newRowid, 0);
-  }
-  return SQLITE_OK;
-}
 
 /**
  * Called when deleting a vector. If the deleted vector was the medoid,
@@ -587,16 +581,7 @@ static int diskann_candidate_list_next_unvisited(
   return -1;
 }
 
-/**
- * Check if a rowid is already in the candidate list.
- */
-static int diskann_candidate_list_contains(
-    const struct DiskannCandidateList *list, i64 rowid) {
-  for (int i = 0; i < list->count; i++) {
-    if (list->items[i].rowid == rowid) return 1;
-  }
-  return 0;
-}
+
 
 /**
  * Simple hash set for tracking visited rowids during search.
