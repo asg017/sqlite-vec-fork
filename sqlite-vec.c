@@ -224,6 +224,63 @@ static f32 l2_sqr_float_neon(const void *pVect1v, const void *pVect2v,
   return sqrt(sum_scalar);
 }
 
+static f32 cosine_float_neon(const void *pVect1v, const void *pVect2v,
+                              const void *qty_ptr) {
+  f32 *pVect1 = (f32 *)pVect1v;
+  f32 *pVect2 = (f32 *)pVect2v;
+  size_t qty = *((size_t *)qty_ptr);
+  size_t qty16 = qty >> 4;
+  const f32 *pEnd1 = pVect1 + (qty16 << 4);
+
+  float32x4_t dot0 = vdupq_n_f32(0), dot1 = vdupq_n_f32(0);
+  float32x4_t dot2 = vdupq_n_f32(0), dot3 = vdupq_n_f32(0);
+  float32x4_t amag0 = vdupq_n_f32(0), amag1 = vdupq_n_f32(0);
+  float32x4_t amag2 = vdupq_n_f32(0), amag3 = vdupq_n_f32(0);
+  float32x4_t bmag0 = vdupq_n_f32(0), bmag1 = vdupq_n_f32(0);
+  float32x4_t bmag2 = vdupq_n_f32(0), bmag3 = vdupq_n_f32(0);
+
+  while (pVect1 < pEnd1) {
+    float32x4_t v1, v2;
+    v1 = vld1q_f32(pVect1); pVect1 += 4;
+    v2 = vld1q_f32(pVect2); pVect2 += 4;
+    dot0 = vfmaq_f32(dot0, v1, v2);
+    amag0 = vfmaq_f32(amag0, v1, v1);
+    bmag0 = vfmaq_f32(bmag0, v2, v2);
+
+    v1 = vld1q_f32(pVect1); pVect1 += 4;
+    v2 = vld1q_f32(pVect2); pVect2 += 4;
+    dot1 = vfmaq_f32(dot1, v1, v2);
+    amag1 = vfmaq_f32(amag1, v1, v1);
+    bmag1 = vfmaq_f32(bmag1, v2, v2);
+
+    v1 = vld1q_f32(pVect1); pVect1 += 4;
+    v2 = vld1q_f32(pVect2); pVect2 += 4;
+    dot2 = vfmaq_f32(dot2, v1, v2);
+    amag2 = vfmaq_f32(amag2, v1, v1);
+    bmag2 = vfmaq_f32(bmag2, v2, v2);
+
+    v1 = vld1q_f32(pVect1); pVect1 += 4;
+    v2 = vld1q_f32(pVect2); pVect2 += 4;
+    dot3 = vfmaq_f32(dot3, v1, v2);
+    amag3 = vfmaq_f32(amag3, v1, v1);
+    bmag3 = vfmaq_f32(bmag3, v2, v2);
+  }
+
+  f32 dot_s = vaddvq_f32(vaddq_f32(vaddq_f32(dot0, dot1), vaddq_f32(dot2, dot3)));
+  f32 amag_s = vaddvq_f32(vaddq_f32(vaddq_f32(amag0, amag1), vaddq_f32(amag2, amag3)));
+  f32 bmag_s = vaddvq_f32(vaddq_f32(vaddq_f32(bmag0, bmag1), vaddq_f32(bmag2, bmag3)));
+
+  const f32 *pEnd2 = pVect1 + (qty - (qty16 << 4));
+  while (pVect1 < pEnd2) {
+    dot_s += *pVect1 * *pVect2;
+    amag_s += *pVect1 * *pVect1;
+    bmag_s += *pVect2 * *pVect2;
+    pVect1++; pVect2++;
+  }
+
+  return 1.0f - (dot_s / (sqrtf(amag_s) * sqrtf(bmag_s)));
+}
+
 static f32 l2_sqr_int8_neon(const void *pVect1v, const void *pVect2v,
                             const void *qty_ptr) {
   i8 *pVect1 = (i8 *)pVect1v;
@@ -462,6 +519,11 @@ static double distance_l1_f32(const void *a, const void *b, const void *d) {
 
 static f32 distance_cosine_float(const void *pVect1v, const void *pVect2v,
                                  const void *qty_ptr) {
+#ifdef SQLITE_VEC_ENABLE_NEON
+  if ((*(const size_t *)qty_ptr) > 16) {
+    return cosine_float_neon(pVect1v, pVect2v, qty_ptr);
+  }
+#endif
   f32 *pVect1 = (f32 *)pVect1v;
   f32 *pVect2 = (f32 *)pVect2v;
   size_t qty = *((size_t *)qty_ptr);
@@ -478,8 +540,7 @@ static f32 distance_cosine_float(const void *pVect1v, const void *pVect2v,
   }
   return 1 - (dot / (sqrt(aMag) * sqrt(bMag)));
 }
-static f32 distance_cosine_int8(const void *pA, const void *pB,
-                                const void *pD) {
+static f32 cosine_int8(const void *pA, const void *pB, const void *pD) {
   i8 *a = (i8 *)pA;
   i8 *b = (i8 *)pB;
   size_t d = *((size_t *)pD);
@@ -495,6 +556,125 @@ static f32 distance_cosine_int8(const void *pA, const void *pB,
     b++;
   }
   return 1 - (dot / (sqrt(aMag) * sqrt(bMag)));
+}
+
+#ifdef SQLITE_VEC_ENABLE_NEON
+static f32 cosine_int8_neon(const void *pA, const void *pB, const void *pD) {
+  const i8 *a = (const i8 *)pA;
+  const i8 *b = (const i8 *)pB;
+  size_t d = *((const size_t *)pD);
+  const i8 *aEnd = a + d;
+
+  int32x4_t dot_acc1 = vdupq_n_s32(0);
+  int32x4_t dot_acc2 = vdupq_n_s32(0);
+  int32x4_t aMag_acc1 = vdupq_n_s32(0);
+  int32x4_t aMag_acc2 = vdupq_n_s32(0);
+  int32x4_t bMag_acc1 = vdupq_n_s32(0);
+  int32x4_t bMag_acc2 = vdupq_n_s32(0);
+
+  while (a < aEnd - 31) {
+    int8x16_t va1 = vld1q_s8(a);
+    int8x16_t vb1 = vld1q_s8(b);
+    int16x8_t a1_lo = vmovl_s8(vget_low_s8(va1));
+    int16x8_t a1_hi = vmovl_s8(vget_high_s8(va1));
+    int16x8_t b1_lo = vmovl_s8(vget_low_s8(vb1));
+    int16x8_t b1_hi = vmovl_s8(vget_high_s8(vb1));
+
+    dot_acc1 = vmlal_s16(dot_acc1, vget_low_s16(a1_lo), vget_low_s16(b1_lo));
+    dot_acc1 = vmlal_s16(dot_acc1, vget_high_s16(a1_lo), vget_high_s16(b1_lo));
+    dot_acc2 = vmlal_s16(dot_acc2, vget_low_s16(a1_hi), vget_low_s16(b1_hi));
+    dot_acc2 = vmlal_s16(dot_acc2, vget_high_s16(a1_hi), vget_high_s16(b1_hi));
+
+    aMag_acc1 = vmlal_s16(aMag_acc1, vget_low_s16(a1_lo), vget_low_s16(a1_lo));
+    aMag_acc1 = vmlal_s16(aMag_acc1, vget_high_s16(a1_lo), vget_high_s16(a1_lo));
+    aMag_acc2 = vmlal_s16(aMag_acc2, vget_low_s16(a1_hi), vget_low_s16(a1_hi));
+    aMag_acc2 = vmlal_s16(aMag_acc2, vget_high_s16(a1_hi), vget_high_s16(a1_hi));
+
+    bMag_acc1 = vmlal_s16(bMag_acc1, vget_low_s16(b1_lo), vget_low_s16(b1_lo));
+    bMag_acc1 = vmlal_s16(bMag_acc1, vget_high_s16(b1_lo), vget_high_s16(b1_lo));
+    bMag_acc2 = vmlal_s16(bMag_acc2, vget_low_s16(b1_hi), vget_low_s16(b1_hi));
+    bMag_acc2 = vmlal_s16(bMag_acc2, vget_high_s16(b1_hi), vget_high_s16(b1_hi));
+
+    int8x16_t va2 = vld1q_s8(a + 16);
+    int8x16_t vb2 = vld1q_s8(b + 16);
+    int16x8_t a2_lo = vmovl_s8(vget_low_s8(va2));
+    int16x8_t a2_hi = vmovl_s8(vget_high_s8(va2));
+    int16x8_t b2_lo = vmovl_s8(vget_low_s8(vb2));
+    int16x8_t b2_hi = vmovl_s8(vget_high_s8(vb2));
+
+    dot_acc1 = vmlal_s16(dot_acc1, vget_low_s16(a2_lo), vget_low_s16(b2_lo));
+    dot_acc1 = vmlal_s16(dot_acc1, vget_high_s16(a2_lo), vget_high_s16(b2_lo));
+    dot_acc2 = vmlal_s16(dot_acc2, vget_low_s16(a2_hi), vget_low_s16(b2_hi));
+    dot_acc2 = vmlal_s16(dot_acc2, vget_high_s16(a2_hi), vget_high_s16(b2_hi));
+
+    aMag_acc1 = vmlal_s16(aMag_acc1, vget_low_s16(a2_lo), vget_low_s16(a2_lo));
+    aMag_acc1 = vmlal_s16(aMag_acc1, vget_high_s16(a2_lo), vget_high_s16(a2_lo));
+    aMag_acc2 = vmlal_s16(aMag_acc2, vget_low_s16(a2_hi), vget_low_s16(a2_hi));
+    aMag_acc2 = vmlal_s16(aMag_acc2, vget_high_s16(a2_hi), vget_high_s16(a2_hi));
+
+    bMag_acc1 = vmlal_s16(bMag_acc1, vget_low_s16(b2_lo), vget_low_s16(b2_lo));
+    bMag_acc1 = vmlal_s16(bMag_acc1, vget_high_s16(b2_lo), vget_high_s16(b2_lo));
+    bMag_acc2 = vmlal_s16(bMag_acc2, vget_low_s16(b2_hi), vget_low_s16(b2_hi));
+    bMag_acc2 = vmlal_s16(bMag_acc2, vget_high_s16(b2_hi), vget_high_s16(b2_hi));
+
+    a += 32;
+    b += 32;
+  }
+
+  while (a < aEnd - 15) {
+    int8x16_t va = vld1q_s8(a);
+    int8x16_t vb = vld1q_s8(b);
+    int16x8_t a_lo = vmovl_s8(vget_low_s8(va));
+    int16x8_t a_hi = vmovl_s8(vget_high_s8(va));
+    int16x8_t b_lo = vmovl_s8(vget_low_s8(vb));
+    int16x8_t b_hi = vmovl_s8(vget_high_s8(vb));
+
+    dot_acc1 = vmlal_s16(dot_acc1, vget_low_s16(a_lo), vget_low_s16(b_lo));
+    dot_acc1 = vmlal_s16(dot_acc1, vget_high_s16(a_lo), vget_high_s16(b_lo));
+    dot_acc1 = vmlal_s16(dot_acc1, vget_low_s16(a_hi), vget_low_s16(b_hi));
+    dot_acc1 = vmlal_s16(dot_acc1, vget_high_s16(a_hi), vget_high_s16(b_hi));
+
+    aMag_acc1 = vmlal_s16(aMag_acc1, vget_low_s16(a_lo), vget_low_s16(a_lo));
+    aMag_acc1 = vmlal_s16(aMag_acc1, vget_high_s16(a_lo), vget_high_s16(a_lo));
+    aMag_acc1 = vmlal_s16(aMag_acc1, vget_low_s16(a_hi), vget_low_s16(a_hi));
+    aMag_acc1 = vmlal_s16(aMag_acc1, vget_high_s16(a_hi), vget_high_s16(a_hi));
+
+    bMag_acc1 = vmlal_s16(bMag_acc1, vget_low_s16(b_lo), vget_low_s16(b_lo));
+    bMag_acc1 = vmlal_s16(bMag_acc1, vget_high_s16(b_lo), vget_high_s16(b_lo));
+    bMag_acc1 = vmlal_s16(bMag_acc1, vget_low_s16(b_hi), vget_low_s16(b_hi));
+    bMag_acc1 = vmlal_s16(bMag_acc1, vget_high_s16(b_hi), vget_high_s16(b_hi));
+
+    a += 16;
+    b += 16;
+  }
+
+  int32x4_t dot_sum = vaddq_s32(dot_acc1, dot_acc2);
+  int32x4_t aMag_sum = vaddq_s32(aMag_acc1, aMag_acc2);
+  int32x4_t bMag_sum = vaddq_s32(bMag_acc1, bMag_acc2);
+
+  i32 dot = vaddvq_s32(dot_sum);
+  i32 aMag = vaddvq_s32(aMag_sum);
+  i32 bMag = vaddvq_s32(bMag_sum);
+
+  while (a < aEnd) {
+    dot += (i32)*a * (i32)*b;
+    aMag += (i32)*a * (i32)*a;
+    bMag += (i32)*b * (i32)*b;
+    a++;
+    b++;
+  }
+
+  return 1.0f - ((f32)dot / (sqrtf((f32)aMag) * sqrtf((f32)bMag)));
+}
+#endif
+
+static f32 distance_cosine_int8(const void *a, const void *b, const void *d) {
+#ifdef SQLITE_VEC_ENABLE_NEON
+  if ((*(const size_t *)d) > 15) {
+    return cosine_int8_neon(a, b, d);
+  }
+#endif
+  return cosine_int8(a, b, d);
 }
 
 // https://github.com/facebookresearch/faiss/blob/77e2e79cd0a680adc343b9840dd865da724c579e/faiss/utils/hamming_distance/common.h#L34
