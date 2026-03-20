@@ -1118,7 +1118,11 @@ static int diskann_add_reverse_edge(
                              neighborIds, neighborIdsSize,
                              qvecs, qvecsSize);
   } else {
-    // Full: collect neighbors + target, RobustPrune
+    // Full: lazy replacement — use quantized distances to find the worst
+    // existing neighbor and replace it if target is closer. This avoids
+    // reading all neighbors' float vectors (the expensive RobustPrune path).
+
+    // Quantize the node's vector and the target vector for comparison
     void *nodeVector = NULL;
     int nodeVecSize;
     rc = diskann_vector_read(p, vec_col_idx, node_rowid,
@@ -1130,60 +1134,67 @@ static int diskann_add_reverse_edge(
       return rc;
     }
 
-    int candidateCount = currentCount + 1;
-    i64 *candidateRowids = sqlite3_malloc(candidateCount * sizeof(i64));
-    f32 *candidateDistances = sqlite3_malloc(candidateCount * sizeof(f32));
-    if (!candidateRowids || !candidateDistances) {
+    // Quantize target for node-level comparison
+    size_t qvecSize = diskann_quantized_vector_byte_size(
+        cfg->quantizer_type, col->dimensions);
+    u8 *targetQ = sqlite3_malloc(qvecSize);
+    u8 *nodeQ = sqlite3_malloc(qvecSize);
+    if (!targetQ || !nodeQ) {
+      sqlite3_free(targetQ);
+      sqlite3_free(nodeQ);
       sqlite3_free(nodeVector);
-      sqlite3_free(candidateRowids);
-      sqlite3_free(candidateDistances);
       sqlite3_free(validity);
       sqlite3_free(neighborIds);
       sqlite3_free(qvecs);
       return SQLITE_NOMEM;
     }
 
-    int idx = 0;
+    if (col->element_type == SQLITE_VEC_ELEMENT_TYPE_FLOAT32) {
+      diskann_quantize_vector((const f32 *)target_vector, col->dimensions,
+                               cfg->quantizer_type, targetQ);
+      diskann_quantize_vector((const f32 *)nodeVector, col->dimensions,
+                               cfg->quantizer_type, nodeQ);
+    } else {
+      memcpy(targetQ, target_vector, qvecSize);
+      memcpy(nodeQ, nodeVector, qvecSize);
+    }
+
+    // Compute quantized distance from node to target
+    f32 targetDist = diskann_distance_quantized_precomputed(
+        nodeQ, targetQ, col->dimensions,
+        cfg->quantizer_type, col->distance_metric);
+
+    // Find the worst (farthest) existing neighbor using quantized distances
+    int worstIdx = -1;
+    f32 worstDist = -1.0f;
     for (int i = 0; i < cfg->n_neighbors; i++) {
       if (!diskann_validity_get(validity, i)) continue;
-      candidateRowids[idx] = diskann_neighbor_id_get(neighborIds, i);
-      void *nVec = NULL;
-      int nVecSize;
-      rc = diskann_vector_read(p, vec_col_idx, candidateRowids[idx],
-                                &nVec, &nVecSize);
-      if (rc == SQLITE_OK) {
-        candidateDistances[idx] = vec0_distance_full(
-            nodeVector, nVec, col->dimensions,
-            col->element_type, col->distance_metric);
-        sqlite3_free(nVec);
-        idx++;
+      const u8 *nqvec = diskann_neighbor_qvec_get(
+          qvecs, i, cfg->quantizer_type, col->dimensions);
+      f32 d = diskann_distance_quantized_precomputed(
+          nodeQ, nqvec, col->dimensions,
+          cfg->quantizer_type, col->distance_metric);
+      if (d > worstDist) {
+        worstDist = d;
+        worstIdx = i;
       }
     }
 
-    candidateRowids[idx] = target_rowid;
-    candidateDistances[idx] = vec0_distance_full(
-        nodeVector, target_vector, col->dimensions,
-        col->element_type, col->distance_metric);
-    idx++;
-    candidateCount = idx;
-
-    i64 *prunedNeighbors = sqlite3_malloc(cfg->n_neighbors * sizeof(i64));
-    int prunedCount = 0;
-    if (prunedNeighbors) {
-      rc = diskann_robust_prune(p, vec_col_idx, node_rowid, nodeVector,
-                                 candidateRowids, candidateDistances,
-                                 candidateCount,
-                                 cfg->alpha, cfg->n_neighbors,
-                                 prunedNeighbors, &prunedCount);
-      if (rc == SQLITE_OK) {
-        rc = diskann_write_pruned_neighbors(p, vec_col_idx, node_rowid,
-                                             prunedNeighbors, prunedCount);
-      }
-      sqlite3_free(prunedNeighbors);
+    // Replace worst neighbor if target is closer
+    if (worstIdx >= 0 && targetDist < worstDist) {
+      diskann_node_set_neighbor(validity, neighborIds, qvecs, worstIdx,
+                                 target_rowid, targetQ,
+                                 cfg->quantizer_type, col->dimensions);
+      rc = diskann_node_write(p, vec_col_idx, node_rowid,
+                               validity, validitySize,
+                               neighborIds, neighborIdsSize,
+                               qvecs, qvecsSize);
+    } else {
+      rc = SQLITE_OK;  // target is farther than all existing neighbors, skip
     }
 
-    sqlite3_free(candidateRowids);
-    sqlite3_free(candidateDistances);
+    sqlite3_free(targetQ);
+    sqlite3_free(nodeQ);
     sqlite3_free(nodeVector);
   }
 
