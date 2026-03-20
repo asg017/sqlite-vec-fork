@@ -6216,6 +6216,65 @@ int min_idx(const f32 *distances, i32 n, u8 *candidates, i32 *out, i32 k,
   assert(k > 0);
   assert(k <= n);
 
+#ifdef SQLITE_VEC_EXPERIMENTAL_MIN_IDX
+  // Max-heap variant: O(n log k) single-pass.
+  // out[0..heap_size-1] stores indices; heap ordered by distances descending
+  // so out[0] is always the index of the LARGEST distance in the top-k.
+  (void)bTaken;
+  int heap_size = 0;
+
+  #define HEAP_SIFT_UP(pos) do {                          \
+    int _c = (pos);                                       \
+    while (_c > 0) {                                      \
+      int _p = (_c - 1) / 2;                              \
+      if (distances[out[_p]] < distances[out[_c]]) {      \
+        i32 _tmp = out[_p]; out[_p] = out[_c]; out[_c] = _tmp; \
+        _c = _p;                                          \
+      } else break;                                       \
+    }                                                     \
+  } while(0)
+
+  #define HEAP_SIFT_DOWN(pos, sz) do {                    \
+    int _p = (pos);                                       \
+    for (;;) {                                            \
+      int _l = 2*_p + 1, _r = 2*_p + 2, _largest = _p;  \
+      if (_l < (sz) && distances[out[_l]] > distances[out[_largest]]) \
+        _largest = _l;                                    \
+      if (_r < (sz) && distances[out[_r]] > distances[out[_largest]]) \
+        _largest = _r;                                    \
+      if (_largest == _p) break;                          \
+      i32 _tmp = out[_p]; out[_p] = out[_largest]; out[_largest] = _tmp; \
+      _p = _largest;                                      \
+    }                                                     \
+  } while(0)
+
+  for (int i = 0; i < n; i++) {
+    if (!bitmap_get(candidates, i))
+      continue;
+    if (heap_size < k) {
+      out[heap_size] = i;
+      heap_size++;
+      HEAP_SIFT_UP(heap_size - 1);
+    } else if (distances[i] < distances[out[0]]) {
+      out[0] = i;
+      HEAP_SIFT_DOWN(0, heap_size);
+    }
+  }
+
+  // Heapsort to produce ascending order.
+  for (int i = heap_size - 1; i > 0; i--) {
+    i32 tmp = out[0]; out[0] = out[i]; out[i] = tmp;
+    HEAP_SIFT_DOWN(0, i);
+  }
+
+  #undef HEAP_SIFT_UP
+  #undef HEAP_SIFT_DOWN
+
+  *k_used = heap_size;
+  return SQLITE_OK;
+
+#else
+  // Original: O(n*k) repeated linear scan with bitmap.
   bitmap_clear(bTaken, n);
 
   for (int ik = 0; ik < k; ik++) {
@@ -6241,6 +6300,7 @@ int min_idx(const f32 *distances, i32 n, u8 *candidates, i32 *out, i32 k,
   }
   *k_used = k;
   return SQLITE_OK;
+#endif
 }
 
 int vec0_get_metadata_text_long_value(
