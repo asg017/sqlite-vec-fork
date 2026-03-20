@@ -9593,20 +9593,22 @@ int vec0Update_Delete(sqlite3_vtab *pVTab, sqlite3_value *idValue) {
     }
   }
 
-  // 7. delete metadata
-  for(int i = 0; i < p->numMetadataColumns; i++) {
-    rc = vec0Update_Delete_ClearMetadata(p, i, rowid, chunk_id, chunk_offset);
-    if (rc != SQLITE_OK) {
-      return rc;
+  // 7. delete metadata and reclaim chunk (only when using chunk-based storage)
+  if (!vec0_all_columns_diskann(p)) {
+    for(int i = 0; i < p->numMetadataColumns; i++) {
+      rc = vec0Update_Delete_ClearMetadata(p, i, rowid, chunk_id, chunk_offset);
+      if (rc != SQLITE_OK) {
+        return rc;
+      }
     }
-  }
 
-  // 8. reclaim chunk if fully empty
-  {
-    int chunkDeleted;
-    rc = vec0Update_Delete_DeleteChunkIfEmpty(p, chunk_id, &chunkDeleted);
-    if (rc != SQLITE_OK) {
-      return rc;
+    // 8. reclaim chunk if fully empty
+    {
+      int chunkDeleted;
+      rc = vec0Update_Delete_DeleteChunkIfEmpty(p, chunk_id, &chunkDeleted);
+      if (rc != SQLITE_OK) {
+        return rc;
+      }
     }
   }
 
