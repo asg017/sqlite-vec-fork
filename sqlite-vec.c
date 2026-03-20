@@ -2317,12 +2317,17 @@ static f32 vec0_distance_full(
   return 0.0f;
 }
 
+enum Vec0IndexType {
+  VEC0_INDEX_TYPE_FLAT = 1,
+};
+
 struct VectorColumnDefinition {
   char *name;
   int name_length;
   size_t dimensions;
   enum VectorElementType element_type;
   enum Vec0DistanceMetrics distance_metric;
+  enum Vec0IndexType index_type;
 };
 
 struct Vec0PartitionColumnDefinition {
@@ -2382,6 +2387,7 @@ int vec0_parse_vector_column(const char *source, int source_length,
   int nameLength;
   enum VectorElementType elementType;
   enum Vec0DistanceMetrics distanceMetric = VEC0_DISTANCE_METRIC_L2;
+  enum Vec0IndexType indexType = VEC0_INDEX_TYPE_FLAT;
   int dimensions;
 
   vec0_scanner_init(&scanner, source, source_length);
@@ -2485,6 +2491,40 @@ int vec0_parse_vector_column(const char *source, int source_length,
         return SQLITE_ERROR;
       }
     }
+    else if (sqlite3_strnicmp(key, "indexed", keyLength) == 0) {
+      // expect "by"
+      rc = vec0_scanner_next(&scanner, &token);
+      if (rc != VEC0_TOKEN_RESULT_SOME ||
+          token.token_type != TOKEN_TYPE_IDENTIFIER ||
+          sqlite3_strnicmp(token.start, "by", token.end - token.start) != 0) {
+        return SQLITE_ERROR;
+      }
+      // expect index type name
+      rc = vec0_scanner_next(&scanner, &token);
+      if (rc != VEC0_TOKEN_RESULT_SOME ||
+          token.token_type != TOKEN_TYPE_IDENTIFIER) {
+        return SQLITE_ERROR;
+      }
+      int indexNameLen = token.end - token.start;
+      if (sqlite3_strnicmp(token.start, "flat", indexNameLen) == 0) {
+        indexType = VEC0_INDEX_TYPE_FLAT;
+        // expect '('
+        rc = vec0_scanner_next(&scanner, &token);
+        if (rc != VEC0_TOKEN_RESULT_SOME ||
+            token.token_type != TOKEN_TYPE_LPAREN) {
+          return SQLITE_ERROR;
+        }
+        // expect ')'
+        rc = vec0_scanner_next(&scanner, &token);
+        if (rc != VEC0_TOKEN_RESULT_SOME ||
+            token.token_type != TOKEN_TYPE_RPAREN) {
+          return SQLITE_ERROR;
+        }
+      } else {
+        // unknown index type
+        return SQLITE_ERROR;
+      }
+    }
     // unknown key
     else {
       return SQLITE_ERROR;
@@ -2499,6 +2539,7 @@ int vec0_parse_vector_column(const char *source, int source_length,
   outColumn->distance_metric = distanceMetric;
   outColumn->element_type = elementType;
   outColumn->dimensions = dimensions;
+  outColumn->index_type = indexType;
   return SQLITE_OK;
 }
 
