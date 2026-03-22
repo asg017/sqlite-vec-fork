@@ -68,6 +68,7 @@ enum Vec0IndexType {
   VEC0_INDEX_TYPE_RESCORE = 2,
   VEC0_INDEX_TYPE_IVF = 3,
   VEC0_INDEX_TYPE_DISKANN = 4,
+  VEC0_INDEX_TYPE_ANNOY = 5,
 };
 
 enum Vec0RescoreQuantizerType {
@@ -106,6 +107,20 @@ struct Vec0DiskannConfig {
   int buffer_threshold;
 };
 
+// Annoy types
+
+enum Vec0AnnoyQuantizerType {
+  VEC0_ANNOY_QUANTIZER_NONE   = 0,
+  VEC0_ANNOY_QUANTIZER_INT8   = 1,
+  VEC0_ANNOY_QUANTIZER_BINARY = 2,
+};
+
+struct Vec0AnnoyConfig {
+  int n_trees;
+  int search_k;
+  enum Vec0AnnoyQuantizerType quantizer;
+};
+
 struct VectorColumnDefinition {
   char *name;
   int name_length;
@@ -116,6 +131,7 @@ struct VectorColumnDefinition {
   struct Vec0RescoreConfig rescore;
   struct Vec0IvfConfig ivf;
   struct Vec0DiskannConfig diskann;
+  struct Vec0AnnoyConfig annoy;
 };
 
 int vec0_parse_vector_column(const char *source, int source_length,
@@ -167,6 +183,20 @@ int diskann_prune_select(
     const float *inter_distances, const float *p_distances,
     int num_candidates, float alpha, int max_neighbors,
     int *outSelected, int *outCount);
+// Annoy node encode/decode
+int annoy_encode_split_node(int left_id, int right_id,
+                             const float *split_vector, int dimensions,
+                             enum Vec0AnnoyQuantizerType quantizer,
+                             unsigned char **outData, int *outSize);
+int annoy_decode_split_node(const unsigned char *data, int dataSize, int dimensions,
+                             enum Vec0AnnoyQuantizerType quantizer,
+                             int *outLeft, int *outRight,
+                             const float *queryVector, float *outMargin);
+int annoy_encode_descendants_node(const long long *rowids, int n_rowids,
+                                   unsigned char **outData, int *outSize);
+int annoy_decode_descendants_node(const unsigned char *data, int dataSize,
+                                   const long long **outRowids,
+                                   int *outCount);
 
 #ifdef SQLITE_VEC_TEST
 float _test_distance_l2_sqr_float(const float *a, const float *b, size_t dims);

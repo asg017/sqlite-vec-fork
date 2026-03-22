@@ -1,0 +1,13 @@
+# Data files (download with `make -C seed download`)
+seed/*.parquet
+seed/base.db
+
+# Benchmark outputs
+runs/
+
+# Profiling data
+*.data
+
+# Build artifacts
+*.so
+*.o

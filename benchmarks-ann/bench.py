@@ -142,8 +142,7 @@ INDEX_REGISTRY["baseline"] = {
 
 # ============================================================================
 # Rescore implementation
-# ============================================================================
-
+# =====================================================================
 
 def _rescore_create_table_sql(params):
     quantizer = params.get("quantizer", "bit")
@@ -215,8 +214,7 @@ INDEX_REGISTRY["ivf"] = {
 }
 
 
-# ============================================================================
-# DiskANN implementation
+# =====================================================================# DiskANN implementation
 # ============================================================================
 
 
@@ -248,6 +246,58 @@ INDEX_REGISTRY["diskann"] = {
     "post_insert_hook": None,
     "run_query": None,
     "describe": _diskann_describe,
+}
+
+
+# ============================================================================
+# Annoy implementation
+# ============================================================================
+
+
+def _annoy_create_table_sql(params):
+    extra_opts = ""
+    if params["search_k"] > 0:
+        extra_opts += f", search_k={params['search_k']}"
+    if params["quantizer"] != "none":
+        extra_opts += f", quantizer={params['quantizer']}"
+    return (
+        f"CREATE VIRTUAL TABLE vec_items USING vec0("
+        f"  id integer primary key,"
+        f"  embedding float[768] distance_metric=cosine"
+        f"    INDEXED BY annoy("
+        f"      n_trees={params['n_trees']}"
+        f"      {extra_opts}"
+        f"    )"
+        f")"
+    )
+
+
+def _annoy_post_insert_hook(conn, params):
+    print(f"  Building annoy index (n_trees={params['n_trees']})...", flush=True)
+    t0 = time.perf_counter()
+    conn.execute(
+        "INSERT INTO vec_items(id, embedding) VALUES ('build-index', NULL)"
+    )
+    conn.commit()
+    elapsed = time.perf_counter() - t0
+    print(f"  Build complete in {elapsed:.1f}s", flush=True)
+    return elapsed
+
+
+def _annoy_describe(params):
+    sk = params["search_k"]
+    q = params["quantizer"]
+    q_str = f" q={q}" if q != "none" else ""
+    return f"annoy  t={params['n_trees']:<3} sk={'auto' if sk == 0 else sk}{q_str}"
+
+
+INDEX_REGISTRY["annoy"] = {
+    "defaults": {"n_trees": 50, "search_k": 0, "quantizer": "none"},
+    "create_table_sql": _annoy_create_table_sql,
+    "insert_sql": None,
+    "post_insert_hook": _annoy_post_insert_hook,
+    "run_query": None,
+    "describe": _annoy_describe,
 }
 
 

@@ -2502,6 +2502,7 @@ enum Vec0IndexType {
   VEC0_INDEX_TYPE_RESCORE = 2,
   VEC0_INDEX_TYPE_IVF = 3,
   VEC0_INDEX_TYPE_DISKANN = 4,
+  VEC0_INDEX_TYPE_ANNOY = 5,
 };
 
 enum Vec0RescoreQuantizerType {
@@ -2536,62 +2537,63 @@ struct Vec0IvfConfig {
 #define VEC0_DISKANN_DEFAULT_SEARCH_LIST_SIZE 128
 #define VEC0_DISKANN_DEFAULT_ALPHA 1.2f
 
-/**
- * Quantizer type used for compressing neighbor vectors in the DiskANN graph.
- */
 enum Vec0DiskannQuantizerType {
-  VEC0_DISKANN_QUANTIZER_BINARY = 1,   // 1 bit per dimension (1/32 compression)
-  VEC0_DISKANN_QUANTIZER_INT8   = 2,   // 1 byte per dimension (1/4 compression)
+  VEC0_DISKANN_QUANTIZER_BINARY = 1,
+  VEC0_DISKANN_QUANTIZER_INT8   = 2,
 };
 
-/**
- * Configuration for a DiskANN index on a single vector column.
- * Parsed from `INDEXED BY diskann(neighbor_quantizer=binary, n_neighbors=72)`.
- */
 struct Vec0DiskannConfig {
-  // Quantizer type for neighbor vectors
   enum Vec0DiskannQuantizerType quantizer_type;
-
-  // Maximum number of neighbors per node (R in the paper). Must be divisible by 8.
   int n_neighbors;
-
-  // Search list size (L in the paper) for greedy search during queries.
-  // Can be overridden at query time.
   int search_list_size;
-
-  // Alpha parameter for RobustPrune (distance scaling factor, typically 1.0-1.5)
   f32 alpha;
-
-  // Buffer threshold for batched inserts. When > 0, inserts go into a flat
-  // buffer table and are flushed into the graph when the buffer reaches this
-  // size. 0 = disabled (legacy per-row insert behavior).
   int buffer_threshold;
 };
 
-/**
- * Represents a single candidate during greedy beam search.
- * Used in priority queues / sorted arrays during LM-Search.
- */
 struct Vec0DiskannCandidate {
   i64 rowid;
   f32 distance;
-  int visited;  // 1 if this candidate's neighbors have been explored
+  int visited;
 };
 
-/**
- * Returns the byte size of a quantized vector for the given quantizer type
- * and number of dimensions.
- */
 size_t diskann_quantized_vector_byte_size(
     enum Vec0DiskannQuantizerType quantizer_type, size_t dimensions) {
   switch (quantizer_type) {
     case VEC0_DISKANN_QUANTIZER_BINARY:
-      return dimensions / CHAR_BIT;  // 1 bit per dimension
+      return dimensions / CHAR_BIT;
     case VEC0_DISKANN_QUANTIZER_INT8:
-      return dimensions * sizeof(i8);  // 1 byte per dimension
+      return dimensions * sizeof(i8);
   }
   return 0;
 }
+
+// ============================================================
+// Annoy types and constants
+// ============================================================
+
+#define VEC0_ANNOY_DEFAULT_N_TREES 50
+#define VEC0_ANNOY_MAX_N_TREES 1000
+#define VEC0_ANNOY_DEFAULT_SEARCH_K 0
+#define VEC0_ANNOY_MAX_DESCENDANTS 48
+
+#define VEC0_ANNOY_NODE_TYPE_SPLIT       0
+#define VEC0_ANNOY_NODE_TYPE_DESCENDANTS 1
+
+enum Vec0AnnoyQuantizerType {
+  VEC0_ANNOY_QUANTIZER_NONE   = 0,
+  VEC0_ANNOY_QUANTIZER_INT8   = 1,
+  VEC0_ANNOY_QUANTIZER_BINARY = 2,
+};
+
+struct Vec0AnnoyConfig {
+  int n_trees;
+  int search_k;
+  enum Vec0AnnoyQuantizerType quantizer;
+};
+
+#define VEC0_SHADOW_ANNOY_NODES_N_NAME "\"%w\".\"%w_annoy_nodes%02d\""
+#define VEC0_SHADOW_ANNOY_VECTORS_N_NAME "\"%w\".\"%w_annoy_vectors%02d\""
+#define VEC0_SHADOW_ANNOY_BUFFER_N_NAME "\"%w\".\"%w_annoy_buffer%02d\""
 
 struct VectorColumnDefinition {
   char *name;
@@ -2603,6 +2605,7 @@ struct VectorColumnDefinition {
   struct Vec0RescoreConfig rescore;
   struct Vec0IvfConfig ivf;
   struct Vec0DiskannConfig diskann;
+  struct Vec0AnnoyConfig annoy;
 };
 
 struct Vec0PartitionColumnDefinition {
@@ -2742,6 +2745,79 @@ static int vec0_parse_rescore_options(struct Vec0Scanner *scanner,
   return SQLITE_OK;
 }
 
+static int vec0_parse_annoy_options(struct Vec0Scanner *scanner,
+                                     struct Vec0AnnoyConfig *config) {
+  int rc;
+  struct Vec0Token token;
+
+  config->n_trees = VEC0_ANNOY_DEFAULT_N_TREES;
+  config->search_k = VEC0_ANNOY_DEFAULT_SEARCH_K;
+
+  rc = vec0_scanner_next(scanner, &token);
+  if (rc != VEC0_TOKEN_RESULT_SOME || token.token_type != TOKEN_TYPE_LPAREN) {
+    return SQLITE_ERROR;
+  }
+
+  while (1) {
+    rc = vec0_scanner_next(scanner, &token);
+    if (rc == VEC0_TOKEN_RESULT_SOME && token.token_type == TOKEN_TYPE_RPAREN) {
+      break;
+    }
+    if (rc != VEC0_TOKEN_RESULT_SOME || token.token_type != TOKEN_TYPE_IDENTIFIER) {
+      return SQLITE_ERROR;
+    }
+    char *optKey = token.start;
+    int optKeyLen = token.end - token.start;
+
+    rc = vec0_scanner_next(scanner, &token);
+    if (rc != VEC0_TOKEN_RESULT_SOME || token.token_type != TOKEN_TYPE_EQ) {
+      return SQLITE_ERROR;
+    }
+
+    rc = vec0_scanner_next(scanner, &token);
+    if (rc != VEC0_TOKEN_RESULT_SOME) {
+      return SQLITE_ERROR;
+    }
+    char *optVal = token.start;
+    int optValLen = token.end - token.start;
+    UNUSED_PARAMETER(optValLen);
+
+    if (sqlite3_strnicmp(optKey, "n_trees", optKeyLen) == 0) {
+      config->n_trees = atoi(optVal);
+      if (config->n_trees <= 0 || config->n_trees > VEC0_ANNOY_MAX_N_TREES) {
+        return SQLITE_ERROR;
+      }
+    } else if (sqlite3_strnicmp(optKey, "search_k", optKeyLen) == 0) {
+      config->search_k = atoi(optVal);
+      if (config->search_k < 0) {
+        return SQLITE_ERROR;
+      }
+    } else if (sqlite3_strnicmp(optKey, "quantizer", optKeyLen) == 0) {
+      if (sqlite3_strnicmp(optVal, "none", optValLen) == 0) {
+        config->quantizer = VEC0_ANNOY_QUANTIZER_NONE;
+      } else if (sqlite3_strnicmp(optVal, "int8", optValLen) == 0) {
+        config->quantizer = VEC0_ANNOY_QUANTIZER_INT8;
+      } else if (sqlite3_strnicmp(optVal, "binary", optValLen) == 0) {
+        config->quantizer = VEC0_ANNOY_QUANTIZER_BINARY;
+      } else {
+        return SQLITE_ERROR;
+      }
+    } else {
+      return SQLITE_ERROR;
+    }
+
+    rc = vec0_scanner_next(scanner, &token);
+    if (rc == VEC0_TOKEN_RESULT_SOME && token.token_type == TOKEN_TYPE_RPAREN) {
+      break;
+    }
+    if (rc != VEC0_TOKEN_RESULT_SOME || token.token_type != TOKEN_TYPE_COMMA) {
+      return SQLITE_ERROR;
+    }
+  }
+
+  return SQLITE_OK;
+}
+
 /**
  * @brief Parse an vec0 vtab argv[i] column definition and see if
  * it's a vector column defintion, ex `contents_embedding float[768]`.
@@ -2875,6 +2951,8 @@ int vec0_parse_vector_column(const char *source, int source_length,
   memset(&ivfConfig, 0, sizeof(ivfConfig));
   struct Vec0DiskannConfig diskannConfig;
   memset(&diskannConfig, 0, sizeof(diskannConfig));
+  struct Vec0AnnoyConfig annoyConfig;
+  memset(&annoyConfig, 0, sizeof(annoyConfig));
   int dimensions;
   vec0_scanner_init(&scanner, source, source_length);
 
@@ -3012,7 +3090,6 @@ int vec0_parse_vector_column(const char *source, int source_length,
         if (elementType != SQLITE_VEC_ELEMENT_TYPE_FLOAT32) {
           return SQLITE_ERROR;
         }
-        // expect '('
         rc = vec0_scanner_next(&scanner, &token);
         if (rc != VEC0_TOKEN_RESULT_SOME || token.token_type != TOKEN_TYPE_LPAREN) {
           return SQLITE_ERROR;
@@ -3023,7 +3100,6 @@ int vec0_parse_vector_column(const char *source, int source_length,
           if (rescoreErr) sqlite3_free(rescoreErr);
           return SQLITE_ERROR;
         }
-        // validate dimensions for bit quantizer
         if (rescoreConfig.quantizer_type == VEC0_RESCORE_QUANTIZER_BIT &&
             (dimensions % CHAR_BIT) != 0) {
           return SQLITE_ERROR;
@@ -3038,6 +3114,12 @@ int vec0_parse_vector_column(const char *source, int source_length,
       } else if (sqlite3_strnicmp(token.start, "diskann", indexNameLen) == 0) {
         indexType = VEC0_INDEX_TYPE_DISKANN;
         rc = vec0_parse_diskann_options(&scanner, &diskannConfig);
+        if (rc != SQLITE_OK) {
+          return rc;
+        }
+      } else if (sqlite3_strnicmp(token.start, "annoy", indexNameLen) == 0) {
+        indexType = VEC0_INDEX_TYPE_ANNOY;
+        rc = vec0_parse_annoy_options(&scanner, &annoyConfig);
         if (rc != SQLITE_OK) {
           return rc;
         }
@@ -3064,6 +3146,7 @@ int vec0_parse_vector_column(const char *source, int source_length,
   outColumn->rescore = rescoreConfig;
   outColumn->ivf = ivfConfig;
   outColumn->diskann = diskannConfig;
+  outColumn->annoy = annoyConfig;
   return SQLITE_OK;
 }
 
@@ -4250,21 +4333,28 @@ struct vec0_vtab {
   sqlite3_stmt *stmtRowidsGetChunkPosition;
 
   // === DiskANN additions ===
-
-  // Shadow table names for DiskANN, per vector column
-  // e.g., "{schema}"."{table}_vectors{00..15}"
   char *shadowVectorsNames[VEC0_MAX_VECTOR_COLUMNS];
-
-  // e.g., "{schema}"."{table}_diskann_nodes{00..15}"
   char *shadowDiskannNodesNames[VEC0_MAX_VECTOR_COLUMNS];
-
-  // Prepared statements for DiskANN operations (per vector column)
-  // These will be lazily prepared on first use.
   sqlite3_stmt *stmtDiskannNodeRead[VEC0_MAX_VECTOR_COLUMNS];
   sqlite3_stmt *stmtDiskannNodeWrite[VEC0_MAX_VECTOR_COLUMNS];
   sqlite3_stmt *stmtDiskannNodeInsert[VEC0_MAX_VECTOR_COLUMNS];
   sqlite3_stmt *stmtVectorsRead[VEC0_MAX_VECTOR_COLUMNS];
   sqlite3_stmt *stmtVectorsInsert[VEC0_MAX_VECTOR_COLUMNS];
+
+  // === Annoy additions ===
+  char *shadowAnnoyNodesNames[VEC0_MAX_VECTOR_COLUMNS];
+  char *shadowAnnoyVectorsNames[VEC0_MAX_VECTOR_COLUMNS];
+  char *shadowAnnoyBufferNames[VEC0_MAX_VECTOR_COLUMNS];
+  sqlite3_stmt *stmtAnnoyNodeRead[VEC0_MAX_VECTOR_COLUMNS];
+  sqlite3_stmt *stmtAnnoyNodeInsert[VEC0_MAX_VECTOR_COLUMNS];
+  sqlite3_stmt *stmtAnnoyNodeDeleteTree[VEC0_MAX_VECTOR_COLUMNS];
+  sqlite3_stmt *stmtAnnoyVectorsRead[VEC0_MAX_VECTOR_COLUMNS];
+  sqlite3_stmt *stmtAnnoyVectorsInsert[VEC0_MAX_VECTOR_COLUMNS];
+  sqlite3_stmt *stmtAnnoyVectorsDelete[VEC0_MAX_VECTOR_COLUMNS];
+  sqlite3_stmt *stmtAnnoyBufferInsert[VEC0_MAX_VECTOR_COLUMNS];
+  sqlite3_stmt *stmtAnnoyBufferRead[VEC0_MAX_VECTOR_COLUMNS];
+  sqlite3_stmt *stmtAnnoyBufferDelete[VEC0_MAX_VECTOR_COLUMNS];
+  sqlite3_stmt *stmtAnnoyBufferCount[VEC0_MAX_VECTOR_COLUMNS];
 };
 
 // Forward declarations for rescore functions (defined in sqlite-vec-rescore.c,
@@ -4306,6 +4396,16 @@ void vec0_free_resources(vec0_vtab *p) {
     sqlite3_finalize(p->stmtDiskannNodeInsert[i]); p->stmtDiskannNodeInsert[i] = NULL;
     sqlite3_finalize(p->stmtVectorsRead[i]); p->stmtVectorsRead[i] = NULL;
     sqlite3_finalize(p->stmtVectorsInsert[i]); p->stmtVectorsInsert[i] = NULL;
+    sqlite3_finalize(p->stmtAnnoyNodeRead[i]); p->stmtAnnoyNodeRead[i] = NULL;
+    sqlite3_finalize(p->stmtAnnoyNodeInsert[i]); p->stmtAnnoyNodeInsert[i] = NULL;
+    sqlite3_finalize(p->stmtAnnoyNodeDeleteTree[i]); p->stmtAnnoyNodeDeleteTree[i] = NULL;
+    sqlite3_finalize(p->stmtAnnoyVectorsRead[i]); p->stmtAnnoyVectorsRead[i] = NULL;
+    sqlite3_finalize(p->stmtAnnoyVectorsInsert[i]); p->stmtAnnoyVectorsInsert[i] = NULL;
+    sqlite3_finalize(p->stmtAnnoyVectorsDelete[i]); p->stmtAnnoyVectorsDelete[i] = NULL;
+    sqlite3_finalize(p->stmtAnnoyBufferInsert[i]); p->stmtAnnoyBufferInsert[i] = NULL;
+    sqlite3_finalize(p->stmtAnnoyBufferRead[i]); p->stmtAnnoyBufferRead[i] = NULL;
+    sqlite3_finalize(p->stmtAnnoyBufferDelete[i]); p->stmtAnnoyBufferDelete[i] = NULL;
+    sqlite3_finalize(p->stmtAnnoyBufferCount[i]); p->stmtAnnoyBufferCount[i] = NULL;
   }
 }
 
@@ -4343,6 +4443,13 @@ void vec0_free(vec0_vtab *p) {
     sqlite3_free(p->shadowDiskannNodesNames[i]);
     p->shadowDiskannNodesNames[i] = NULL;
 
+    sqlite3_free(p->shadowAnnoyNodesNames[i]);
+    p->shadowAnnoyNodesNames[i] = NULL;
+    sqlite3_free(p->shadowAnnoyVectorsNames[i]);
+    p->shadowAnnoyVectorsNames[i] = NULL;
+    sqlite3_free(p->shadowAnnoyBufferNames[i]);
+    p->shadowAnnoyBufferNames[i] = NULL;
+
     sqlite3_free(p->vector_columns[i].name);
     p->vector_columns[i].name = NULL;
   }
@@ -4364,6 +4471,21 @@ void vec0_free(vec0_vtab *p) {
 }
 
 #include "sqlite-vec-diskann.c"
+
+/**
+ * Returns 1 if ALL vector columns use a non-chunk index (DiskANN or Annoy),
+ * meaning chunk-based storage can be skipped entirely.
+ * Rescore and IVF still use chunk infrastructure, so they don't count.
+ */
+static int vec0_all_columns_indexed(vec0_vtab *p) {
+  for (int i = 0; i < p->numVectorColumns; i++) {
+    enum Vec0IndexType t = p->vector_columns[i].index_type;
+    if (t != VEC0_INDEX_TYPE_DISKANN && t != VEC0_INDEX_TYPE_ANNOY) return 0;
+  }
+  return p->numVectorColumns > 0;
+}
+
+#include "sqlite-vec-annoy.c"
 
 int vec0_num_defined_user_columns(vec0_vtab *p) {
   return p->numVectorColumns + p->numPartitionColumns + p->numAuxiliaryColumns + p->numMetadataColumns;
@@ -4659,6 +4781,26 @@ int vec0_get_vector_data(vec0_vtab *pVtab, i64 rowid, int vector_column_idx,
   size_t size;
   void *buf = NULL;
   int blobOffset;
+
+  // Annoy fast path: read from _annoy_vectors table
+  if (p->vector_columns[vector_column_idx].index_type == VEC0_INDEX_TYPE_ANNOY) {
+    const void *vec = NULL;
+    int vecSize = 0;
+    rc = annoy_vector_read(p, vector_column_idx, rowid, &vec, &vecSize);
+    if (rc != SQLITE_OK) {
+      vtab_set_error(&pVtab->base,
+                     "Could not fetch vector data for %lld from Annoy vectors table",
+                     rowid);
+      return rc;
+    }
+    // Must copy — sqlite3_column_blob() memory is transient
+    void *copy = sqlite3_malloc(vecSize);
+    if (!copy) return SQLITE_NOMEM;
+    memcpy(copy, vec, vecSize);
+    *outVector = copy;
+    if (outVectorSize) *outVectorSize = vecSize;
+    return SQLITE_OK;
+  }
   sqlite3_blob *vectorBlob = NULL;
   assert((vector_column_idx >= 0) &&
          (vector_column_idx < pVtab->numVectorColumns));
@@ -5556,6 +5698,17 @@ static int vec0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
         }
       }
 
+      // Annoy validation
+      if (vecColumn.index_type == VEC0_INDEX_TYPE_ANNOY) {
+        if (vecColumn.element_type == SQLITE_VEC_ELEMENT_TYPE_BIT) {
+          sqlite3_free(vecColumn.name);
+          *pzErr = sqlite3_mprintf(
+              VEC_CONSTRUCTOR_ERROR
+              "Annoy index is not supported on bit vector columns");
+          goto error;
+        }
+      }
+
       pNew->user_column_kinds[user_column_idx] = SQLITE_VEC0_USER_COLUMN_KIND_VECTOR;
       pNew->user_column_idxs[user_column_idx] = numVectorColumns;
       memcpy(&pNew->vector_columns[numVectorColumns], &vecColumn, sizeof(vecColumn));
@@ -5849,6 +6002,24 @@ static int vec0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
     if (!pNew->shadowIvfCellsNames[i]) goto error;
     pNew->ivfTrainedCache[i] = -1; // unknown
   }
+  for (int i = 0; i < pNew->numVectorColumns; i++) {
+    if (pNew->vector_columns[i].index_type != VEC0_INDEX_TYPE_ANNOY) continue;
+    pNew->shadowAnnoyNodesNames[i] =
+        sqlite3_mprintf("%s_annoy_nodes%02d", tableName, i);
+    if (!pNew->shadowAnnoyNodesNames[i]) {
+      goto error;
+    }
+    pNew->shadowAnnoyVectorsNames[i] =
+        sqlite3_mprintf("%s_annoy_vectors%02d", tableName, i);
+    if (!pNew->shadowAnnoyVectorsNames[i]) {
+      goto error;
+    }
+    pNew->shadowAnnoyBufferNames[i] =
+        sqlite3_mprintf("%s_annoy_buffer%02d", tableName, i);
+    if (!pNew->shadowAnnoyBufferNames[i]) {
+      goto error;
+    }
+  }
   for (int i = 0; i < pNew->numMetadataColumns; i++) {
     pNew->shadowMetadataChunksNames[i] =
         sqlite3_mprintf("%s_metadatachunks%02d", tableName, i);
@@ -5997,6 +6168,9 @@ static int vec0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
       // Non-FLAT columns don't use _vector_chunks
       if (pNew->vector_columns[i].index_type != VEC0_INDEX_TYPE_FLAT)
         continue;
+      if (pNew->vector_columns[i].index_type == VEC0_INDEX_TYPE_ANNOY) {
+        continue;  // Annoy columns use _annoy_vectors{NN} instead of _vector_chunks{NN}
+      }
       char *zSql = sqlite3_mprintf(VEC0_SHADOW_VECTOR_N_CREATE,
                                    pNew->schemaName, pNew->tableName, i);
       if (!zSql) {
@@ -6099,6 +6273,114 @@ static int vec0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
           sqlite3_finalize(stmt);
           *pzErr = sqlite3_mprintf(
               "Could not create '_diskann_buffer%02d' shadow table: %s", i,
+              sqlite3_errmsg(db));
+          goto error;
+        }
+        sqlite3_finalize(stmt);
+      }
+    }
+
+    // Create Annoy shadow tables for indexed vector columns
+    for (int i = 0; i < pNew->numVectorColumns; i++) {
+      if (pNew->vector_columns[i].index_type != VEC0_INDEX_TYPE_ANNOY) {
+        continue;
+      }
+
+      // Create _annoy_nodes{NN} table
+      {
+        char *zSql = sqlite3_mprintf(
+            "CREATE TABLE " VEC0_SHADOW_ANNOY_NODES_N_NAME " ("
+            "node_id INTEGER PRIMARY KEY,"
+            "tree_id INTEGER NOT NULL,"
+            "node_type INTEGER NOT NULL,"
+            "data BLOB"
+            ");",
+            pNew->schemaName, pNew->tableName, i);
+        if (!zSql) goto error;
+        rc = sqlite3_prepare_v2(db, zSql, -1, &stmt, 0);
+        sqlite3_free(zSql);
+        if ((rc != SQLITE_OK) || (sqlite3_step(stmt) != SQLITE_DONE)) {
+          sqlite3_finalize(stmt);
+          *pzErr = sqlite3_mprintf(
+              "Could not create '_annoy_nodes%02d' shadow table: %s", i,
+              sqlite3_errmsg(db));
+          goto error;
+        }
+        sqlite3_finalize(stmt);
+      }
+      {
+        char *zSql = sqlite3_mprintf(
+            "CREATE INDEX \"%w\".\"idx_%w_annoy_nodes_tree%02d\" "
+            "ON \"%w_annoy_nodes%02d\"(tree_id);",
+            pNew->schemaName, pNew->tableName, i,
+            pNew->tableName, i);
+        if (!zSql) goto error;
+        rc = sqlite3_prepare_v2(db, zSql, -1, &stmt, 0);
+        sqlite3_free(zSql);
+        if ((rc != SQLITE_OK) || (sqlite3_step(stmt) != SQLITE_DONE)) {
+          sqlite3_finalize(stmt);
+          *pzErr = sqlite3_mprintf(
+              "Could not create index on '_annoy_nodes%02d': %s", i,
+              sqlite3_errmsg(db));
+          goto error;
+        }
+        sqlite3_finalize(stmt);
+      }
+
+      // Create _annoy_vectors{NN} table
+      {
+        char *zSql = sqlite3_mprintf(
+            "CREATE TABLE " VEC0_SHADOW_ANNOY_VECTORS_N_NAME " ("
+            "rowid INTEGER PRIMARY KEY,"
+            "vector BLOB NOT NULL"
+            ");",
+            pNew->schemaName, pNew->tableName, i);
+        if (!zSql) goto error;
+        rc = sqlite3_prepare_v2(db, zSql, -1, &stmt, 0);
+        sqlite3_free(zSql);
+        if ((rc != SQLITE_OK) || (sqlite3_step(stmt) != SQLITE_DONE)) {
+          sqlite3_finalize(stmt);
+          *pzErr = sqlite3_mprintf(
+              "Could not create '_annoy_vectors%02d' shadow table: %s", i,
+              sqlite3_errmsg(db));
+          goto error;
+        }
+        sqlite3_finalize(stmt);
+      }
+
+      // Create _annoy_buffer{NN} table
+      {
+        char *zSql = sqlite3_mprintf(
+            "CREATE TABLE " VEC0_SHADOW_ANNOY_BUFFER_N_NAME " ("
+            "rowid INTEGER PRIMARY KEY,"
+            "vector BLOB NOT NULL"
+            ");",
+            pNew->schemaName, pNew->tableName, i);
+        if (!zSql) goto error;
+        rc = sqlite3_prepare_v2(db, zSql, -1, &stmt, 0);
+        sqlite3_free(zSql);
+        if ((rc != SQLITE_OK) || (sqlite3_step(stmt) != SQLITE_DONE)) {
+          sqlite3_finalize(stmt);
+          *pzErr = sqlite3_mprintf(
+              "Could not create '_annoy_buffer%02d' shadow table: %s", i,
+              sqlite3_errmsg(db));
+          goto error;
+        }
+        sqlite3_finalize(stmt);
+      }
+
+      // Seed annoy info key
+      {
+        char *zSql = sqlite3_mprintf(
+            "INSERT INTO \"%w\".\"%w_info\"(key, value) VALUES ('annoy_built%02d', 0);",
+            pNew->schemaName, pNew->tableName, i);
+        if (!zSql) goto error;
+        rc = sqlite3_prepare_v2(db, zSql, -1, &stmt, 0);
+        sqlite3_free(zSql);
+        if ((rc != SQLITE_OK) || (sqlite3_step(stmt) != SQLITE_DONE)) {
+          sqlite3_finalize(stmt);
+          *pzErr = sqlite3_mprintf(
+              "Could not seed annoy info for column %d: %s", i,
               sqlite3_errmsg(db));
           goto error;
         }
@@ -6269,6 +6551,56 @@ static int vec0Destroy(sqlite3_vtab *pVtab) {
       if (zSql) {
         rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, 0);
         sqlite3_free((void *)zSql);
+        if ((rc != SQLITE_OK) || (sqlite3_step(stmt) != SQLITE_DONE)) {
+          rc = SQLITE_ERROR;
+          goto done;
+        }
+        sqlite3_finalize(stmt);
+      }
+      continue;
+    }
+    if (p->vector_columns[i].index_type == VEC0_INDEX_TYPE_ANNOY) {
+      // Drop Annoy shadow tables
+      char *zSql2;
+      zSql2 = sqlite3_mprintf("DROP TABLE IF EXISTS " VEC0_SHADOW_ANNOY_NODES_N_NAME,
+                               p->schemaName, p->tableName, i);
+      if (zSql2) {
+        rc = sqlite3_prepare_v2(p->db, zSql2, -1, &stmt, 0);
+        sqlite3_free(zSql2);
+        if ((rc != SQLITE_OK) || (sqlite3_step(stmt) != SQLITE_DONE)) {
+          rc = SQLITE_ERROR;
+          goto done;
+        }
+        sqlite3_finalize(stmt);
+      }
+      zSql2 = sqlite3_mprintf("DROP TABLE IF EXISTS " VEC0_SHADOW_ANNOY_VECTORS_N_NAME,
+                               p->schemaName, p->tableName, i);
+      if (zSql2) {
+        rc = sqlite3_prepare_v2(p->db, zSql2, -1, &stmt, 0);
+        sqlite3_free(zSql2);
+        if ((rc != SQLITE_OK) || (sqlite3_step(stmt) != SQLITE_DONE)) {
+          rc = SQLITE_ERROR;
+          goto done;
+        }
+        sqlite3_finalize(stmt);
+      }
+      zSql2 = sqlite3_mprintf("DROP TABLE IF EXISTS " VEC0_SHADOW_ANNOY_BUFFER_N_NAME,
+                               p->schemaName, p->tableName, i);
+      if (zSql2) {
+        rc = sqlite3_prepare_v2(p->db, zSql2, -1, &stmt, 0);
+        sqlite3_free(zSql2);
+        if ((rc != SQLITE_OK) || (sqlite3_step(stmt) != SQLITE_DONE)) {
+          rc = SQLITE_ERROR;
+          goto done;
+        }
+        sqlite3_finalize(stmt);
+      }
+      zSql2 = sqlite3_mprintf(
+          "DROP INDEX IF EXISTS \"%w\".\"idx_%w_annoy_nodes_tree%02d\"",
+          p->schemaName, p->tableName, i);
+      if (zSql2) {
+        rc = sqlite3_prepare_v2(p->db, zSql2, -1, &stmt, 0);
+        sqlite3_free(zSql2);
         if ((rc != SQLITE_OK) || (sqlite3_step(stmt) != SQLITE_DONE)) {
           rc = SQLITE_ERROR;
           goto done;
@@ -8080,21 +8412,15 @@ static int vec0Filter_knn_diskann(
   if (!knn_data) return SQLITE_NOMEM;
   memset(knn_data, 0, sizeof(*knn_data));
 
-  // Parse query_idx and k_idx from idxStr
   int query_idx = -1;
   int k_idx = -1;
   for (int i = 0; i < argc; i++) {
-    if (idxStr[1 + (i * 4)] == VEC0_IDXSTR_KIND_KNN_MATCH) {
-      query_idx = i;
-    }
-    if (idxStr[1 + (i * 4)] == VEC0_IDXSTR_KIND_KNN_K) {
-      k_idx = i;
-    }
+    if (idxStr[1 + (i * 4)] == VEC0_IDXSTR_KIND_KNN_MATCH) query_idx = i;
+    if (idxStr[1 + (i * 4)] == VEC0_IDXSTR_KIND_KNN_K) k_idx = i;
   }
   assert(query_idx >= 0);
   assert(k_idx >= 0);
 
-  // Extract query vector
   void *queryVector;
   size_t dimensions;
   enum VectorElementType elementType;
@@ -8127,7 +8453,6 @@ static int vec0Filter_knn_diskann(
     return SQLITE_OK;
   }
 
-  // Run DiskANN search
   i64 *resultRowids = sqlite3_malloc(k * sizeof(i64));
   f32 *resultDistances = sqlite3_malloc(k * sizeof(f32));
   if (!resultRowids || !resultDistances) {
@@ -8151,8 +8476,7 @@ static int vec0Filter_knn_diskann(
     return rc;
   }
 
-  // Scan _diskann_buffer for any buffered (unflushed) vectors and merge
-  // with graph results. This ensures no recall loss for buffered vectors.
+  // Scan _diskann_buffer for buffered vectors and merge with graph results
   {
     sqlite3_stmt *bufStmt = NULL;
     char *zSql = sqlite3_mprintf(
@@ -8174,20 +8498,14 @@ static int vec0Filter_knn_diskann(
         f32 dist = vec0_distance_full(
             queryVector, bufVec, dimensions, elementType,
             vector_column->distance_metric);
-
-        // Check if this buffer vector should replace the worst graph result
         if (resultCount < (int)k) {
-          // Still have room, just add it
           resultRowids[resultCount] = bufRowid;
           resultDistances[resultCount] = dist;
           resultCount++;
         } else {
-          // Find worst (largest distance) in results
           int worstIdx = 0;
           for (int wi = 1; wi < resultCount; wi++) {
-            if (resultDistances[wi] > resultDistances[worstIdx]) {
-              worstIdx = wi;
-            }
+            if (resultDistances[wi] > resultDistances[worstIdx]) worstIdx = wi;
           }
           if (dist < resultDistances[worstIdx]) {
             resultRowids[worstIdx] = bufRowid;
@@ -8201,16 +8519,12 @@ static int vec0Filter_knn_diskann(
 
   queryVectorCleanup(queryVector);
 
-  // Sort results by distance (ascending)
+  // Sort results by distance
   for (int si = 0; si < resultCount - 1; si++) {
     for (int sj = si + 1; sj < resultCount; sj++) {
       if (resultDistances[sj] < resultDistances[si]) {
-        f32 tmpD = resultDistances[si];
-        resultDistances[si] = resultDistances[sj];
-        resultDistances[sj] = tmpD;
-        i64 tmpR = resultRowids[si];
-        resultRowids[si] = resultRowids[sj];
-        resultRowids[sj] = tmpR;
+        f32 tmpD = resultDistances[si]; resultDistances[si] = resultDistances[sj]; resultDistances[sj] = tmpD;
+        i64 tmpR = resultRowids[si]; resultRowids[si] = resultRowids[sj]; resultRowids[sj] = tmpR;
       }
     }
   }
@@ -8220,10 +8534,98 @@ static int vec0Filter_knn_diskann(
   knn_data->rowids = resultRowids;
   knn_data->distances = resultDistances;
   knn_data->current_idx = 0;
-
   pCur->knn_data = knn_data;
   pCur->query_plan = VEC0_QUERY_PLAN_KNN;
+  return SQLITE_OK;
+}
 
+/**
+ * Handle a KNN query using the Annoy tree search.
+ */
+static int vec0Filter_knn_annoy(
+    vec0_cursor *pCur, vec0_vtab *p, int idxNum,
+    const char *idxStr, int argc, sqlite3_value **argv) {
+
+  int rc;
+  int vectorColumnIdx = idxNum;
+  struct VectorColumnDefinition *vector_column = &p->vector_columns[vectorColumnIdx];
+  struct vec0_query_knn_data *knn_data;
+
+  knn_data = sqlite3_malloc(sizeof(*knn_data));
+  if (!knn_data) return SQLITE_NOMEM;
+  memset(knn_data, 0, sizeof(*knn_data));
+
+  int query_idx = -1;
+  int k_idx = -1;
+  for (int i = 0; i < argc; i++) {
+    if (idxStr[1 + (i * 4)] == VEC0_IDXSTR_KIND_KNN_MATCH) query_idx = i;
+    if (idxStr[1 + (i * 4)] == VEC0_IDXSTR_KIND_KNN_K) k_idx = i;
+  }
+  assert(query_idx >= 0);
+  assert(k_idx >= 0);
+
+  void *queryVector;
+  size_t dimensions;
+  enum VectorElementType elementType;
+  vector_cleanup queryVectorCleanup = vector_cleanup_noop;
+  char *pzError;
+
+  rc = vector_from_value(argv[query_idx], &queryVector, &dimensions,
+                          &elementType, &queryVectorCleanup, &pzError);
+  if (rc != SQLITE_OK) {
+    vtab_set_error(&p->base, "Invalid query vector: %z", pzError);
+    sqlite3_free(knn_data);
+    return SQLITE_ERROR;
+  }
+
+  if (elementType != vector_column->element_type ||
+      dimensions != vector_column->dimensions) {
+    vtab_set_error(&p->base, "Query vector type/dimension mismatch");
+    queryVectorCleanup(queryVector);
+    sqlite3_free(knn_data);
+    return SQLITE_ERROR;
+  }
+
+  i64 k = sqlite3_value_int64(argv[k_idx]);
+  if (k <= 0) {
+    knn_data->k = 0;
+    knn_data->k_used = 0;
+    pCur->knn_data = knn_data;
+    pCur->query_plan = VEC0_QUERY_PLAN_KNN;
+    queryVectorCleanup(queryVector);
+    return SQLITE_OK;
+  }
+
+  i64 *resultRowids = sqlite3_malloc(k * sizeof(i64));
+  f32 *resultDistances = sqlite3_malloc(k * sizeof(f32));
+  if (!resultRowids || !resultDistances) {
+    sqlite3_free(resultRowids);
+    sqlite3_free(resultDistances);
+    queryVectorCleanup(queryVector);
+    sqlite3_free(knn_data);
+    return SQLITE_NOMEM;
+  }
+
+  int resultCount = 0;
+  rc = annoy_search_with_buffer(p, vectorColumnIdx, queryVector, (int)k,
+                                 resultRowids, resultDistances, &resultCount);
+
+  queryVectorCleanup(queryVector);
+
+  if (rc != SQLITE_OK) {
+    sqlite3_free(resultRowids);
+    sqlite3_free(resultDistances);
+    sqlite3_free(knn_data);
+    return rc;
+  }
+
+  knn_data->k = resultCount;
+  knn_data->k_used = resultCount;
+  knn_data->rowids = resultRowids;
+  knn_data->distances = resultDistances;
+  knn_data->current_idx = 0;
+  pCur->knn_data = knn_data;
+  pCur->query_plan = VEC0_QUERY_PLAN_KNN;
   return SQLITE_OK;
 }
 
@@ -8240,6 +8642,10 @@ int vec0Filter_knn(vec0_cursor *pCur, vec0_vtab *p, int idxNum,
   // DiskANN dispatch
   if (vector_column->index_type == VEC0_INDEX_TYPE_DISKANN) {
     return vec0Filter_knn_diskann(pCur, p, idxNum, idxStr, argc, argv);
+  }
+  // Annoy dispatch
+  if (vector_column->index_type == VEC0_INDEX_TYPE_ANNOY) {
+    return vec0Filter_knn_annoy(pCur, p, idxNum, idxStr, argc, argv);
   }
 
   struct Array *arrayRowidsIn = NULL;
@@ -9606,6 +10012,45 @@ int vec0Update_Insert(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv,
   const unsigned char *bufferChunksValidity = NULL;
   int numReadVectors = 0;
 
+  // Handle special Annoy commands via INSERT INTO t(id) VALUES ('build-index')
+  {
+    sqlite3_value *idVal = argv[2 + VEC0_COLUMN_ID];
+    if (sqlite3_value_type(idVal) == SQLITE_TEXT) {
+      const char *cmd = (const char *)sqlite3_value_text(idVal);
+      if (cmd && strcmp(cmd, "build-index") == 0) {
+        for (int i = 0; i < p->numVectorColumns; i++) {
+          if (p->vector_columns[i].index_type != VEC0_INDEX_TYPE_ANNOY) continue;
+          rc = annoy_build_all(p, i);
+          if (rc != SQLITE_OK) {
+            vtab_set_error(pVTab, "Failed to build annoy index for column %d", i);
+            return rc;
+          }
+        }
+        return SQLITE_OK;
+      }
+      if (cmd && strcmp(cmd, "rebuild-index") == 0) {
+        for (int i = 0; i < p->numVectorColumns; i++) {
+          if (p->vector_columns[i].index_type != VEC0_INDEX_TYPE_ANNOY) continue;
+          rc = annoy_build_all(p, i);
+          if (rc != SQLITE_OK) {
+            vtab_set_error(pVTab, "Failed to rebuild annoy index for column %d", i);
+            return rc;
+          }
+        }
+        return SQLITE_OK;
+      }
+      // search_k runtime tuning: INSERT INTO t(id) VALUES ('search_k=500')
+      if (cmd && strncmp(cmd, "search_k=", 9) == 0) {
+        int new_sk = atoi(cmd + 9);
+        for (int i = 0; i < p->numVectorColumns; i++) {
+          if (p->vector_columns[i].index_type != VEC0_INDEX_TYPE_ANNOY) continue;
+          p->vector_columns[i].annoy.search_k = new_sk;
+        }
+        return SQLITE_OK;
+      }
+    }
+  }
+
   // Read all provided partition key values into partitionKeyValues
   for (int i = 0; i < vec0_num_defined_user_columns(p); i++) {
     if(p->user_column_kinds[i] != SQLITE_VEC0_USER_COLUMN_KIND_PARTITION) {
@@ -9702,7 +10147,7 @@ int vec0Update_Insert(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv,
     goto cleanup;
   }
 
-  if (!vec0_all_columns_diskann(p)) {
+  if (!vec0_all_columns_indexed(p)) {
     // Step #2: Find the next "available" position in the _chunks table for this
     // row.
     rc = vec0Update_InsertNextAvailableStep(p, partitionKeyValues,
@@ -9742,6 +10187,17 @@ int vec0Update_Insert(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv,
     if (p->vector_columns[i].index_type != VEC0_INDEX_TYPE_IVF) continue;
     int vecSize = (int)vector_column_byte_size(p->vector_columns[i]);
     rc = ivf_insert(p, i, rowid, vectorDatas[i], vecSize);
+  }
+
+  // Step #4b: Insert into Annoy vectors + buffer for annoy-indexed columns
+  for (int i = 0; i < p->numVectorColumns; i++) {
+    if (p->vector_columns[i].index_type != VEC0_INDEX_TYPE_ANNOY) continue;
+    int vecSize = (int)vector_column_byte_size(p->vector_columns[i]);
+    rc = annoy_vector_write(p, i, rowid, vectorDatas[i], vecSize);
+    if (rc != SQLITE_OK) {
+      goto cleanup;
+    }
+    rc = annoy_buffer_add(p, i, rowid, vectorDatas[i], vecSize);
     if (rc != SQLITE_OK) {
       goto cleanup;
     }
@@ -10238,8 +10694,8 @@ int vec0Update_Delete(sqlite3_vtab *pVTab, sqlite3_value *idValue) {
   vec0_vtab *p = (vec0_vtab *)pVTab;
   int rc;
   i64 rowid;
-  i64 chunk_id;
-  i64 chunk_offset;
+  i64 chunk_id = 0;
+  i64 chunk_offset = 0;
 
   if (p->pkIsText) {
     rc = vec0_rowid_from_id(p, idValue, &rowid);
@@ -10250,12 +10706,6 @@ int vec0Update_Delete(sqlite3_vtab *pVTab, sqlite3_value *idValue) {
     rowid = sqlite3_value_int64(idValue);
   }
 
-  // 1. Find chunk position for given rowid
-  // 2. Ensure that validity bit for position is 1, then set to 0
-  // 3. Zero out rowid in chunks.rowid
-  // 4. Zero out vector data in all vector column chunks
-  // 5. Delete value in _rowids table
-
   // DiskANN graph deletion for indexed columns
   for (int i = 0; i < p->numVectorColumns; i++) {
     if (p->vector_columns[i].index_type != VEC0_INDEX_TYPE_DISKANN) continue;
@@ -10265,7 +10715,17 @@ int vec0Update_Delete(sqlite3_vtab *pVTab, sqlite3_value *idValue) {
     }
   }
 
-  if (!vec0_all_columns_diskann(p)) {
+  // Annoy deletion for indexed columns
+  for (int i = 0; i < p->numVectorColumns; i++) {
+    if (p->vector_columns[i].index_type != VEC0_INDEX_TYPE_ANNOY) continue;
+    rc = annoy_vector_delete(p, i, rowid);
+    if (rc != SQLITE_OK) {
+      return rc;
+    }
+    annoy_buffer_remove(p, i, rowid);
+  }
+
+  if (!vec0_all_columns_indexed(p)) {
     // 1. get chunk_id and chunk_offset from _rowids
     rc = vec0_get_chunk_position(p, rowid, NULL, &chunk_id, &chunk_offset);
     if (rc != SQLITE_OK) {
@@ -10313,7 +10773,7 @@ int vec0Update_Delete(sqlite3_vtab *pVTab, sqlite3_value *idValue) {
   }
 
   // 7. delete metadata and reclaim chunk (only when using chunk-based storage)
-  if (!vec0_all_columns_diskann(p)) {
+  if (!vec0_all_columns_indexed(p)) {
     for(int i = 0; i < p->numMetadataColumns; i++) {
       rc = vec0Update_Delete_ClearMetadata(p, i, rowid, chunk_id, chunk_offset);
       if (rc != SQLITE_OK) {
