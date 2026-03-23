@@ -2555,9 +2555,12 @@ struct Vec0DiskannConfig {
   // Maximum number of neighbors per node (R in the paper). Must be divisible by 8.
   int n_neighbors;
 
-  // Search list size (L in the paper) for greedy search during queries.
-  // Can be overridden at query time.
+  // Search list size (L in the paper) — unified default for both insert and query.
   int search_list_size;
+
+  // Per-path overrides (0 = fall back to search_list_size).
+  int search_list_size_search;
+  int search_list_size_insert;
 
   // Alpha parameter for RobustPrune (distance scaling factor, typically 1.0-1.5)
   f32 alpha;
@@ -2774,8 +2777,12 @@ static int vec0_parse_diskann_options(struct Vec0Scanner *scanner,
   // Set defaults
   config->n_neighbors = VEC0_DISKANN_DEFAULT_N_NEIGHBORS;
   config->search_list_size = VEC0_DISKANN_DEFAULT_SEARCH_LIST_SIZE;
+  config->search_list_size_search = 0;
+  config->search_list_size_insert = 0;
   config->alpha = VEC0_DISKANN_DEFAULT_ALPHA;
   config->buffer_threshold = 0;
+  int hasSearchListSize = 0;
+  int hasSearchListSizeSplit = 0;
 
   // Expect '('
   rc = vec0_scanner_next(scanner, &token);
@@ -2824,11 +2831,24 @@ static int vec0_parse_diskann_options(struct Vec0Scanner *scanner,
           config->n_neighbors > VEC0_DISKANN_MAX_N_NEIGHBORS) {
         return SQLITE_ERROR;
       }
+    } else if (sqlite3_strnicmp(optKey, "search_list_size_search", optKeyLen) == 0 && optKeyLen == 23) {
+      config->search_list_size_search = atoi(optVal);
+      if (config->search_list_size_search <= 0) {
+        return SQLITE_ERROR;
+      }
+      hasSearchListSizeSplit = 1;
+    } else if (sqlite3_strnicmp(optKey, "search_list_size_insert", optKeyLen) == 0 && optKeyLen == 23) {
+      config->search_list_size_insert = atoi(optVal);
+      if (config->search_list_size_insert <= 0) {
+        return SQLITE_ERROR;
+      }
+      hasSearchListSizeSplit = 1;
     } else if (sqlite3_strnicmp(optKey, "search_list_size", optKeyLen) == 0) {
       config->search_list_size = atoi(optVal);
       if (config->search_list_size <= 0) {
         return SQLITE_ERROR;
       }
+      hasSearchListSize = 1;
     } else if (sqlite3_strnicmp(optKey, "buffer_threshold", optKeyLen) == 0) {
       config->buffer_threshold = atoi(optVal);
       if (config->buffer_threshold < 0) {
@@ -2850,6 +2870,10 @@ static int vec0_parse_diskann_options(struct Vec0Scanner *scanner,
 
   if (!hasQuantizer) {
     return SQLITE_ERROR;  // neighbor_quantizer is required
+  }
+
+  if (hasSearchListSize && hasSearchListSizeSplit) {
+    return SQLITE_ERROR;  // cannot mix search_list_size with search_list_size_search/insert
   }
 
   return SQLITE_OK;
@@ -10564,8 +10588,10 @@ static int vec0Update(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv,
       const char *cmd = (const char *)sqlite3_value_text(idVal);
       vec0_vtab *p = (vec0_vtab *)pVTab;
       int cmdRc = ivf_handle_command(p, cmd, argc, argv);
+      if (cmdRc == SQLITE_EMPTY)
+        cmdRc = diskann_handle_command(p, cmd);
       if (cmdRc != SQLITE_EMPTY) return cmdRc; // handled (or error)
-      // SQLITE_EMPTY means not an IVF command — fall through to normal insert
+      // SQLITE_EMPTY means not a recognized command — fall through to normal insert
     }
     return vec0Update_Insert(pVTab, argc, argv, pRowid);
   }
