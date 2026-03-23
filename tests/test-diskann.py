@@ -532,3 +532,95 @@ def test_diskann_drop_table(db):
         ).fetchall()
     ]
     assert len(tables) == 0
+
+
+def test_diskann_create_split_search_list_size(db):
+    """DiskANN with separate search_list_size_search and search_list_size_insert."""
+    db.execute("""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[128] INDEXED BY diskann(
+                neighbor_quantizer=binary,
+                search_list_size_search=256,
+                search_list_size_insert=64
+            )
+        )
+    """)
+    tables = [
+        row[0]
+        for row in db.execute(
+            "select name from sqlite_master where name like 't%' order by 1"
+        ).fetchall()
+    ]
+    assert "t" in tables
+
+
+def test_diskann_create_error_mixed_search_list_size(db):
+    """Error when mixing search_list_size with search_list_size_search."""
+    result = exec(db, """
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[128] INDEXED BY diskann(
+                neighbor_quantizer=binary,
+                search_list_size=128,
+                search_list_size_search=256
+            )
+        )
+    """)
+    assert "error" in result
+
+
+def test_diskann_command_search_list_size(db):
+    """Runtime search_list_size override via command insert."""
+    db.execute("""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[64] INDEXED BY diskann(neighbor_quantizer=binary)
+        )
+    """)
+    import struct, random
+    random.seed(42)
+    for i in range(20):
+        vec = struct.pack("64f", *[random.random() for _ in range(64)])
+        db.execute("INSERT INTO t(emb) VALUES (?)", [vec])
+
+    # Query with default search_list_size
+    query = struct.pack("64f", *[random.random() for _ in range(64)])
+    results_before = db.execute(
+        "SELECT rowid, distance FROM t WHERE emb MATCH ? AND k = 5", [query]
+    ).fetchall()
+    assert len(results_before) == 5
+
+    # Override search_list_size_search at runtime
+    db.execute("INSERT INTO t(rowid) VALUES ('search_list_size_search=256')")
+
+    # Query should still work
+    results_after = db.execute(
+        "SELECT rowid, distance FROM t WHERE emb MATCH ? AND k = 5", [query]
+    ).fetchall()
+    assert len(results_after) == 5
+
+    # Override search_list_size_insert at runtime
+    db.execute("INSERT INTO t(rowid) VALUES ('search_list_size_insert=32')")
+
+    # Inserts should still work
+    vec = struct.pack("64f", *[random.random() for _ in range(64)])
+    db.execute("INSERT INTO t(emb) VALUES (?)", [vec])
+
+    # Override unified search_list_size
+    db.execute("INSERT INTO t(rowid) VALUES ('search_list_size=64')")
+
+    results_final = db.execute(
+        "SELECT rowid, distance FROM t WHERE emb MATCH ? AND k = 5", [query]
+    ).fetchall()
+    assert len(results_final) == 5
+
+
+def test_diskann_command_search_list_size_error(db):
+    """Error on invalid search_list_size command value."""
+    db.execute("""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[64] INDEXED BY diskann(neighbor_quantizer=binary)
+        )
+    """)
+    result = exec(db, "INSERT INTO t(rowid) VALUES ('search_list_size=0')")
+    assert "error" in result
+    result = exec(db, "INSERT INTO t(rowid) VALUES ('search_list_size=-1')")
+    assert "error" in result

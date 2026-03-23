@@ -1505,6 +1505,41 @@ void test_vec0_parse_vector_column_diskann() {
     sqlite3_free(col.name);
   }
 
+  // Split search_list_size: search and insert
+  {
+    const char *input = "emb float[128] INDEXED BY diskann(neighbor_quantizer=binary, search_list_size_search=256, search_list_size_insert=64)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == SQLITE_OK);
+    assert(col.diskann.search_list_size == 128);  // default (unified)
+    assert(col.diskann.search_list_size_search == 256);
+    assert(col.diskann.search_list_size_insert == 64);
+    sqlite3_free(col.name);
+  }
+
+  // Split search_list_size: only search
+  {
+    const char *input = "emb float[128] INDEXED BY diskann(neighbor_quantizer=binary, search_list_size_search=200)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == SQLITE_OK);
+    assert(col.diskann.search_list_size_search == 200);
+    assert(col.diskann.search_list_size_insert == 0);
+    sqlite3_free(col.name);
+  }
+
+  // Error: cannot mix search_list_size with search_list_size_search
+  {
+    const char *input = "emb float[128] INDEXED BY diskann(neighbor_quantizer=binary, search_list_size=128, search_list_size_search=256)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == SQLITE_ERROR);
+  }
+
+  // Error: cannot mix search_list_size with search_list_size_insert
+  {
+    const char *input = "emb float[128] INDEXED BY diskann(neighbor_quantizer=binary, search_list_size=128, search_list_size_insert=64)";
+    rc = vec0_parse_vector_column(input, (int)strlen(input), &col);
+    assert(rc == SQLITE_ERROR);
+  }
+
   printf("  All vec0_parse_vector_column_diskann tests passed.\n");
 }
 
