@@ -677,7 +677,7 @@ static int diskann_search(
   int rc;
 
   if (searchListSize <= 0) {
-    searchListSize = cfg->search_list_size;
+    searchListSize = cfg->search_list_size_search > 0 ? cfg->search_list_size_search : cfg->search_list_size;
   }
   if (searchListSize < k) {
     searchListSize = k;
@@ -1375,7 +1375,7 @@ static int diskann_insert_graph(vec0_vtab *p, int vec_col_idx,
   }
 
   // Search for nearest neighbors
-  int L = cfg->search_list_size;
+  int L = cfg->search_list_size_insert > 0 ? cfg->search_list_size_insert : cfg->search_list_size;
   i64 *searchRowids = sqlite3_malloc(L * sizeof(i64));
   f32 *searchDistances = sqlite3_malloc(L * sizeof(f32));
   if (!searchRowids || !searchDistances) {
@@ -1674,5 +1674,39 @@ static int vec0_all_columns_diskann(vec0_vtab *p) {
     if (p->vector_columns[i].index_type != VEC0_INDEX_TYPE_DISKANN) return 0;
   }
   return p->numVectorColumns > 0;
+}
+
+// ============================================================================
+// Command dispatch
+// ============================================================================
+
+static int diskann_handle_command(vec0_vtab *p, const char *command) {
+  int col_idx = -1;
+  for (int i = 0; i < p->numVectorColumns; i++) {
+    if (p->vector_columns[i].index_type == VEC0_INDEX_TYPE_DISKANN) { col_idx = i; break; }
+  }
+  if (col_idx < 0) return SQLITE_EMPTY;
+
+  struct Vec0DiskannConfig *cfg = &p->vector_columns[col_idx].diskann;
+
+  if (strncmp(command, "search_list_size_search=", 24) == 0) {
+    int val = atoi(command + 24);
+    if (val < 1) { vtab_set_error(&p->base, "search_list_size_search must be >= 1"); return SQLITE_ERROR; }
+    cfg->search_list_size_search = val;
+    return SQLITE_OK;
+  }
+  if (strncmp(command, "search_list_size_insert=", 24) == 0) {
+    int val = atoi(command + 24);
+    if (val < 1) { vtab_set_error(&p->base, "search_list_size_insert must be >= 1"); return SQLITE_ERROR; }
+    cfg->search_list_size_insert = val;
+    return SQLITE_OK;
+  }
+  if (strncmp(command, "search_list_size=", 17) == 0) {
+    int val = atoi(command + 17);
+    if (val < 1) { vtab_set_error(&p->base, "search_list_size must be >= 1"); return SQLITE_ERROR; }
+    cfg->search_list_size = val;
+    return SQLITE_OK;
+  }
+  return SQLITE_EMPTY;
 }
 
