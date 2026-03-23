@@ -102,6 +102,8 @@ struct Vec0DiskannConfig {
   enum Vec0DiskannQuantizerType quantizer_type;
   int n_neighbors;
   int search_list_size;
+  int search_list_size_search;
+  int search_list_size_insert;
   float alpha;
   int buffer_threshold;
 };
