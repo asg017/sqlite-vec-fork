@@ -160,6 +160,13 @@ clean:
 	rm -rf dist
 
 
+TARGET_AMALGAMATION=$(prefix)/sqlite-vec.c
+
+amalgamation: $(TARGET_AMALGAMATION)
+
+$(TARGET_AMALGAMATION): sqlite-vec.c $(wildcard sqlite-vec-*.c) scripts/amalgamate.py $(prefix)
+	python3 scripts/amalgamate.py sqlite-vec.c > $@
+
 FORMAT_FILES=sqlite-vec.h sqlite-vec.c
 format: $(FORMAT_FILES)
 	clang-format -i $(FORMAT_FILES)
@@ -179,7 +186,7 @@ evidence-of:
 test:
 	sqlite3 :memory: '.read test.sql'
 
-.PHONY: version loadable static test clean gh-release evidence-of install uninstall
+.PHONY: version loadable static test clean gh-release evidence-of install uninstall amalgamation
 
 publish-release:
 	./scripts/publish-release.sh
