@@ -10,7 +10,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: ./scripts/vendor.sh
-      - run: make loadable
+      - run: make loadable static
       - uses: actions/upload-artifact@v4
         with:
           name: sqlite-vec-linux-x86_64-extension
@@ -20,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: ./scripts/vendor.sh
-      - run: make loadable
+      - run: make loadable static
       - uses: actions/upload-artifact@v4
         with:
           name: sqlite-vec-linux-aarch64-extension
@@ -30,7 +30,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: ./scripts/vendor.sh
-      - run: make loadable
+      - run: make loadable static
       - uses: actions/upload-artifact@v4
         with:
           name: sqlite-vec-macos-x86_64-extension
@@ -40,7 +40,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: ./scripts/vendor.sh
-      - run: make loadable
+      - run: make loadable static
       - uses: actions/upload-artifact@v4
         with:
           name: sqlite-vec-macos-aarch64-extension
@@ -95,7 +95,12 @@ jobs:
           name: sqlite-vec-windows-x86_64-extension
           path: dist/windows-x86_64
       - run: make sqlite-vec.h
-      - run: make amalgamation
+      - run: |
+          ./scripts/vendor.sh
+          make amalgamation
+          mkdir -p amalgamation
+          cp dist/sqlite-vec.c sqlite-vec.h amalgamation/
+          rm dist/sqlite-vec.c
       - uses: asg017/setup-sqlite-dist@73e37b2ffb0b51e64a64eb035da38c958b9ff6c6
       - run: sqlite-dist build --set-version $(cat VERSION)
       - name: Create release and upload assets
@@ -104,9 +109,10 @@ jobs:
         run: |
           SHORT_SHA=$(echo "${{ github.sha }}" | head -c 10)
           TAG="diskann-${SHORT_SHA}"
+          zip -j "amalgamation/sqlite-vec-amalgamation.zip" amalgamation/sqlite-vec.c amalgamation/sqlite-vec.h
           gh release create "$TAG" \
             --title "$TAG" \
             --target "${{ github.sha }}" \
             --prerelease \
-            .sqlite-dist/amalgamation/* \
+            amalgamation/sqlite-vec-amalgamation.zip \
             .sqlite-dist/pip/*
