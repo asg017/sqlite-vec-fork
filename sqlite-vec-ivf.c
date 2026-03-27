@@ -12,6 +12,12 @@
 #ifndef SQLITE_VEC_IVF_C
 #define SQLITE_VEC_IVF_C
 
+#ifdef SQLITE_VEC_TEST
+#define IVF_STATIC
+#else
+#define IVF_STATIC static
+#endif
+
 // When opened standalone in an editor, pull in sqlite-vec.c so the LSP
 // can resolve all types (vec0_vtab, VectorColumnDefinition, etc.).
 // When #include'd from sqlite-vec.c, SQLITE_VEC_H is already defined.
@@ -153,7 +159,7 @@ static int ivf_full_vec_size(vec0_vtab *p, int col_idx) {
  * Quantize float32 vector to int8.
  * Uses unit normalization: clamp to [-1,1], scale to [-127,127].
  */
-static void ivf_quantize_int8(const float *src, int8_t *dst, int D) {
+IVF_STATIC void ivf_quantize_int8(const float *src, int8_t *dst, int D) {
   for (int i = 0; i < D; i++) {
     float v = src[i];
     if (v > 1.0f) v = 1.0f;
@@ -166,7 +172,7 @@ static void ivf_quantize_int8(const float *src, int8_t *dst, int D) {
  * Quantize float32 vector to binary (sign-bit quantization).
  * Each bit = 1 if src[i] > 0, else 0.
  */
-static void ivf_quantize_binary(const float *src, uint8_t *dst, int D) {
+IVF_STATIC void ivf_quantize_binary(const float *src, uint8_t *dst, int D) {
   memset(dst, 0, D / 8);
   for (int i = 0; i < D; i++) {
     if (src[i] > 0.0f) {
@@ -555,7 +561,8 @@ static int ivf_insert(vec0_vtab *p, int col_idx, i64 rowid,
     while (sqlite3_step(stmt) == SQLITE_ROW) {
       int cid = sqlite3_column_int(stmt, 0);
       const void *c = sqlite3_column_blob(stmt, 1);
-      if (!c) continue;
+      int cBytes = sqlite3_column_bytes(stmt, 1);
+      if (!c || cBytes != qvecSize) continue;
       float dist = ivf_distance(p, col_idx, qvec, c);
       if (dist < min_dist) { min_dist = dist; best_centroid = cid; }
     }
@@ -735,8 +742,11 @@ static int ivf_load_all_vectors(vec0_vtab *p, int col_idx,
       while (sqlite3_step(stmt) == SQLITE_ROW && idx < total) {
         rowids[idx] = sqlite3_column_int64(stmt, 0);
         const void *blob = sqlite3_column_blob(stmt, 1);
-        if (blob) memcpy(&vectors[idx * D], blob, vecSize);
-        idx++;
+        int blobBytes = sqlite3_column_bytes(stmt, 1);
+        if (blob && blobBytes == vecSize) {
+          memcpy(&vectors[idx * D], blob, vecSize);
+          idx++;
+        }
       }
     }
     sqlite3_finalize(stmt);
@@ -776,8 +786,14 @@ static int ivf_load_all_vectors(vec0_vtab *p, int col_idx,
     const unsigned char *val = (const unsigned char *)sqlite3_column_blob(stmt, 1);
     const i64 *rids = (const i64 *)sqlite3_column_blob(stmt, 2);
     const float *vecs = (const float *)sqlite3_column_blob(stmt, 3);
-    int cap = sqlite3_column_bytes(stmt, 1) * 8;
+    int valBytes = sqlite3_column_bytes(stmt, 1);
+    int ridsBytes = sqlite3_column_bytes(stmt, 2);
+    int vecsBytes = sqlite3_column_bytes(stmt, 3);
     if (!val || !rids || !vecs) continue;
+    int cap = valBytes * 8;
+    // Clamp cap to the number of entries actually backed by the rowids and vectors blobs
+    if (ridsBytes / (int)sizeof(i64) < cap) cap = ridsBytes / (int)sizeof(i64);
+    if (vecsBytes / vecSize < cap) cap = vecsBytes / vecSize;
     for (int i = 0; i < cap && idx < total; i++) {
       if (val[i / 8] & (1 << (i % 8))) {
         rowids[idx] = rids[i];
@@ -1056,7 +1072,8 @@ static int ivf_cmd_assign_vectors(vec0_vtab *p, int col_idx) {
   rc = sqlite3_prepare_v2(p->db, zSql, -1, &stmt, NULL); sqlite3_free(zSql);
   { int ci = 0; while (sqlite3_step(stmt) == SQLITE_ROW && ci < nlist) {
       const void *b = sqlite3_column_blob(stmt, 1);
-      if (b) memcpy(&centroids[ci * D], b, vecSize);
+      int bBytes = sqlite3_column_bytes(stmt, 1);
+      if (b && bBytes == vecSize) memcpy(&centroids[ci * D], b, vecSize);
       ci++;
   }}
   sqlite3_finalize(stmt);
@@ -1076,8 +1093,13 @@ static int ivf_cmd_assign_vectors(vec0_vtab *p, int col_idx) {
     const unsigned char *val = (const unsigned char *)sqlite3_column_blob(stmt, 2);
     const i64 *rids = (const i64 *)sqlite3_column_blob(stmt, 3);
     const float *vecs = (const float *)sqlite3_column_blob(stmt, 4);
-    int cap = sqlite3_column_bytes(stmt, 2) * 8;
+    int valBytes = sqlite3_column_bytes(stmt, 2);
+    int ridsBytes = sqlite3_column_bytes(stmt, 3);
+    int vecsBytes = sqlite3_column_bytes(stmt, 4);
     if (!val || !rids || !vecs) continue;
+    int cap = valBytes * 8;
+    if (ridsBytes / (int)sizeof(i64) < cap) cap = ridsBytes / (int)sizeof(i64);
+    if (vecsBytes / vecSize < cap) cap = vecsBytes / vecSize;
 
     for (int i = 0; i < cap && n > 0; i++) {
       if (!(val[i / 8] & (1 << (i % 8)))) continue;
@@ -1173,8 +1195,13 @@ static int ivf_scan_cells_from_stmt(vec0_vtab *p, int col_idx,
     const unsigned char *validity = (const unsigned char *)sqlite3_column_blob(stmt, 1);
     const i64 *rowids = (const i64 *)sqlite3_column_blob(stmt, 2);
     const unsigned char *vectors = (const unsigned char *)sqlite3_column_blob(stmt, 3);
-    int cell_cap = sqlite3_column_bytes(stmt, 1) * 8;
+    int valBytes = sqlite3_column_bytes(stmt, 1);
+    int ridsBytes = sqlite3_column_bytes(stmt, 2);
+    int vecsBytes = sqlite3_column_bytes(stmt, 3);
     if (!validity || !rowids || !vectors) continue;
+    int cell_cap = valBytes * 8;
+    if (ridsBytes / (int)sizeof(i64) < cell_cap) cell_cap = ridsBytes / (int)sizeof(i64);
+    if (vecsBytes / qvecSize < cell_cap) cell_cap = vecsBytes / qvecSize;
 
     int found = 0;
     for (int i = 0; i < cell_cap && found < n; i++) {
@@ -1241,8 +1268,9 @@ static int ivf_query_knn(vec0_vtab *p, int col_idx,
       }
       cd[nlist].id = sqlite3_column_int(stmt, 0);
       const void *c = sqlite3_column_blob(stmt, 1);
+      int cBytes = sqlite3_column_bytes(stmt, 1);
       // Compare quantized query with quantized centroid
-      cd[nlist].dist = c ? ivf_distance(p, col_idx, queryQ, c) : FLT_MAX;
+      cd[nlist].dist = (c && cBytes == qvecSize) ? ivf_distance(p, col_idx, queryQ, c) : FLT_MAX;
       nlist++;
     }
 
@@ -1319,7 +1347,8 @@ static int ivf_query_knn(vec0_vtab *p, int col_idx,
           sqlite3_bind_int64(stmtVec, 1, candidates[i].rowid);
           if (sqlite3_step(stmtVec) == SQLITE_ROW) {
             const float *fullVec = (const float *)sqlite3_column_blob(stmtVec, 0);
-            if (fullVec) {
+            int fullVecBytes = sqlite3_column_bytes(stmtVec, 0);
+            if (fullVec && fullVecBytes == (int)p->vector_columns[col_idx].dimensions * (int)sizeof(float)) {
               candidates[i].distance = ivf_distance_float(p, col_idx,
                   (const float *)queryVector, fullVec);
             }
