@@ -733,6 +733,30 @@ void test_distance_hamming() {
     assert(d == 16.0f);
   }
 
+  // Large vector (256 bits = 32 bytes) — exercises NEON path on ARM
+  {
+    unsigned char a[32];
+    unsigned char b[32];
+    memset(a, 0xFF, 32);
+    memset(b, 0x00, 32);
+    d = _test_distance_hamming(a, b, 256);
+    assert(d == 256.0f);
+  }
+
+  // Large vector (1024 bits = 128 bytes) — exercises 64-byte NEON loop
+  {
+    unsigned char a[128];
+    unsigned char b[128];
+    memset(a, 0x00, 128);
+    memset(b, 0x00, 128);
+    // Set every other byte to 0xFF in a, 0x00 in b -> 8 bits per byte * 64 bytes = 512
+    for (int i = 0; i < 128; i += 2) {
+      a[i] = 0xFF;
+    }
+    d = _test_distance_hamming(a, b, 1024);
+    assert(d == 512.0f);
+  }
+
   printf("  All distance_hamming tests passed.\n");
 }
 
