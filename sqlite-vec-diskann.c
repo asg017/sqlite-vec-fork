@@ -386,6 +386,20 @@ static int diskann_node_read(vec0_vtab *p, int vec_col_idx, i64 rowid,
   int is = sqlite3_column_bytes(stmt, 1);
   int qs = sqlite3_column_bytes(stmt, 2);
 
+  // Validate blob sizes against config expectations to detect truncated /
+  // corrupt data before any caller iterates using cfg->n_neighbors.
+  {
+    struct VectorColumnDefinition *col = &p->vector_columns[vec_col_idx];
+    struct Vec0DiskannConfig *cfg = &col->diskann;
+    int expectedVs = diskann_validity_byte_size(cfg->n_neighbors);
+    int expectedIs = (int)diskann_neighbor_ids_byte_size(cfg->n_neighbors);
+    int expectedQs = (int)diskann_neighbor_qvecs_byte_size(
+        cfg->n_neighbors, cfg->quantizer_type, col->dimensions);
+    if (vs != expectedVs || is != expectedIs || qs != expectedQs) {
+      return SQLITE_CORRUPT;
+    }
+  }
+
   u8 *v = sqlite3_malloc(vs);
   u8 *ids = sqlite3_malloc(is);
   u8 *qv = sqlite3_malloc(qs);
@@ -1709,4 +1723,46 @@ static int diskann_handle_command(vec0_vtab *p, const char *command) {
   }
   return SQLITE_EMPTY;
 }
+
+#ifdef SQLITE_VEC_TEST
+// Expose internal DiskANN data structures and functions for unit testing.
+
+int _test_diskann_candidate_list_init(struct DiskannCandidateList *list, int capacity) {
+  return diskann_candidate_list_init(list, capacity);
+}
+void _test_diskann_candidate_list_free(struct DiskannCandidateList *list) {
+  diskann_candidate_list_free(list);
+}
+int _test_diskann_candidate_list_insert(struct DiskannCandidateList *list, long long rowid, float distance) {
+  return diskann_candidate_list_insert(list, (i64)rowid, (f32)distance);
+}
+int _test_diskann_candidate_list_next_unvisited(const struct DiskannCandidateList *list) {
+  return diskann_candidate_list_next_unvisited(list);
+}
+int _test_diskann_candidate_list_count(const struct DiskannCandidateList *list) {
+  return list->count;
+}
+long long _test_diskann_candidate_list_rowid(const struct DiskannCandidateList *list, int i) {
+  return (long long)list->items[i].rowid;
+}
+float _test_diskann_candidate_list_distance(const struct DiskannCandidateList *list, int i) {
+  return (float)list->items[i].distance;
+}
+void _test_diskann_candidate_list_set_visited(struct DiskannCandidateList *list, int i) {
+  list->items[i].visited = 1;
+}
+
+int _test_diskann_visited_set_init(struct DiskannVisitedSet *set, int capacity) {
+  return diskann_visited_set_init(set, capacity);
+}
+void _test_diskann_visited_set_free(struct DiskannVisitedSet *set) {
+  diskann_visited_set_free(set);
+}
+int _test_diskann_visited_set_contains(const struct DiskannVisitedSet *set, long long rowid) {
+  return diskann_visited_set_contains(set, (i64)rowid);
+}
+int _test_diskann_visited_set_insert(struct DiskannVisitedSet *set, long long rowid) {
+  return diskann_visited_set_insert(set, (i64)rowid);
+}
+#endif /* SQLITE_VEC_TEST */
 

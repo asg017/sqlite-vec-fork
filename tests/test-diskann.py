@@ -624,3 +624,537 @@ def test_diskann_command_search_list_size_error(db):
     assert "error" in result
     result = exec(db, "INSERT INTO t(rowid) VALUES ('search_list_size=-1')")
     assert "error" in result
+
+
+# ======================================================================
+# Error cases: DiskANN + auxiliary/metadata/partition columns
+# ======================================================================
+
+def test_diskann_create_error_with_auxiliary_column(db):
+    """DiskANN tables should not support auxiliary columns."""
+    result = exec(db, """
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[64] INDEXED BY diskann(neighbor_quantizer=binary),
+            +extra text
+        )
+    """)
+    assert "error" in result
+    assert "auxiliary" in result["message"].lower() or "Auxiliary" in result["message"]
+
+
+def test_diskann_create_error_with_metadata_column(db):
+    """DiskANN tables should not support metadata columns."""
+    result = exec(db, """
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[64] INDEXED BY diskann(neighbor_quantizer=binary),
+            metadata_col integer metadata
+        )
+    """)
+    assert "error" in result
+    assert "metadata" in result["message"].lower() or "Metadata" in result["message"]
+
+
+def test_diskann_create_error_with_partition_key(db):
+    """DiskANN tables should not support partition key columns."""
+    result = exec(db, """
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[64] INDEXED BY diskann(neighbor_quantizer=binary),
+            user_id text partition key
+        )
+    """)
+    assert "error" in result
+    assert "partition" in result["message"].lower() or "Partition" in result["message"]
+
+
+# ======================================================================
+# Insert edge cases
+# ======================================================================
+
+def test_diskann_insert_no_rowid(db):
+    """INSERT without explicit rowid (auto-generated) should work."""
+    db.execute("""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[8] INDEXED BY diskann(neighbor_quantizer=binary)
+        )
+    """)
+    db.execute("INSERT INTO t(emb) VALUES (?)", [_f32([1.0] * 8)])
+    db.execute("INSERT INTO t(emb) VALUES (?)", [_f32([2.0] * 8)])
+    assert db.execute("SELECT count(*) FROM t_vectors00").fetchone()[0] == 2
+    assert db.execute("SELECT count(*) FROM t_diskann_nodes00").fetchone()[0] == 2
+
+
+def test_diskann_insert_large_batch(db):
+    """INSERT 500+ vectors, verify all are queryable via KNN."""
+    db.execute("""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[16] INDEXED BY diskann(neighbor_quantizer=binary, n_neighbors=16)
+        )
+    """)
+    import random
+    random.seed(99)
+    N = 500
+    for i in range(1, N + 1):
+        vec = [random.gauss(0, 1) for _ in range(16)]
+        db.execute("INSERT INTO t(rowid, emb) VALUES (?, ?)", [i, _f32(vec)])
+
+    assert db.execute("SELECT count(*) FROM t_vectors00").fetchone()[0] == N
+    assert db.execute("SELECT count(*) FROM t_diskann_nodes00").fetchone()[0] == N
+
+    # KNN should return results
+    query = [random.gauss(0, 1) for _ in range(16)]
+    rows = db.execute(
+        "SELECT rowid, distance FROM t WHERE emb MATCH ? AND k=10",
+        [_f32(query)],
+    ).fetchall()
+    assert len(rows) == 10
+    # Distances should be sorted
+    distances = [r[1] for r in rows]
+    for i in range(len(distances) - 1):
+        assert distances[i] <= distances[i + 1]
+
+
+def test_diskann_insert_zero_vector(db):
+    """Insert an all-zero vector (edge case for binary quantizer)."""
+    db.execute("""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[8] INDEXED BY diskann(neighbor_quantizer=binary)
+        )
+    """)
+    db.execute("INSERT INTO t(rowid, emb) VALUES (1, ?)", [_f32([0.0] * 8)])
+    db.execute("INSERT INTO t(rowid, emb) VALUES (2, ?)", [_f32([1.0] * 8)])
+    count = db.execute("SELECT count(*) FROM t_vectors00").fetchone()[0]
+    assert count == 2
+
+    # Query with zero vector should find rowid 1 as closest
+    rows = db.execute(
+        "SELECT rowid, distance FROM t WHERE emb MATCH ? AND k=2",
+        [_f32([0.0] * 8)],
+    ).fetchall()
+    assert len(rows) == 2
+    assert rows[0][0] == 1
+
+
+def test_diskann_insert_large_values(db):
+    """Insert vectors with very large float values."""
+    db.execute("""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[8] INDEXED BY diskann(neighbor_quantizer=binary)
+        )
+    """)
+    import sys
+    large = sys.float_info.max / 1e300  # Large but not overflowing
+    db.execute("INSERT INTO t(rowid, emb) VALUES (1, ?)", [_f32([large] * 8)])
+    db.execute("INSERT INTO t(rowid, emb) VALUES (2, ?)", [_f32([-large] * 8)])
+    db.execute("INSERT INTO t(rowid, emb) VALUES (3, ?)", [_f32([0.0] * 8)])
+    assert db.execute("SELECT count(*) FROM t_vectors00").fetchone()[0] == 3
+
+
+def test_diskann_insert_int8_quantizer_knn(db):
+    """Full insert + query cycle with int8 quantizer."""
+    db.execute("""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[16] INDEXED BY diskann(neighbor_quantizer=int8, n_neighbors=8)
+        )
+    """)
+    import random
+    random.seed(77)
+    for i in range(1, 31):
+        vec = [random.gauss(0, 1) for _ in range(16)]
+        db.execute("INSERT INTO t(rowid, emb) VALUES (?, ?)", [i, _f32(vec)])
+
+    assert db.execute("SELECT count(*) FROM t_vectors00").fetchone()[0] == 30
+
+    # KNN should work
+    query = [random.gauss(0, 1) for _ in range(16)]
+    rows = db.execute(
+        "SELECT rowid, distance FROM t WHERE emb MATCH ? AND k=5",
+        [_f32(query)],
+    ).fetchall()
+    assert len(rows) == 5
+    distances = [r[1] for r in rows]
+    for i in range(len(distances) - 1):
+        assert distances[i] <= distances[i + 1]
+
+
+# ======================================================================
+# Delete edge cases
+# ======================================================================
+
+def test_diskann_delete_nonexistent(db):
+    """DELETE of a nonexistent rowid should either be a no-op or return an error, not crash."""
+    db.execute("""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[8] INDEXED BY diskann(neighbor_quantizer=binary, n_neighbors=8)
+        )
+    """)
+    db.execute("INSERT INTO t(rowid, emb) VALUES (1, ?)", [_f32([1.0] * 8)])
+    # Deleting a nonexistent rowid may error but should not crash
+    result = exec(db, "DELETE FROM t WHERE rowid = 999")
+    # Whether it succeeds or errors, the existing row should still be there
+    assert db.execute("SELECT count(*) FROM t_vectors00").fetchone()[0] == 1
+
+
+def test_diskann_delete_then_reinsert_same_rowid(db):
+    """Delete rowid 5, then reinsert rowid 5 with a new vector."""
+    db.execute("""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[8] INDEXED BY diskann(neighbor_quantizer=binary, n_neighbors=8)
+        )
+    """)
+    for i in range(1, 6):
+        db.execute("INSERT INTO t(rowid, emb) VALUES (?, ?)", [i, _f32([float(i)] * 8)])
+
+    db.execute("DELETE FROM t WHERE rowid = 5")
+    assert db.execute("SELECT count(*) FROM t_vectors00").fetchone()[0] == 4
+
+    # Reinsert with new vector
+    db.execute("INSERT INTO t(rowid, emb) VALUES (5, ?)", [_f32([99.0] * 8)])
+    assert db.execute("SELECT count(*) FROM t_vectors00").fetchone()[0] == 5
+    assert db.execute("SELECT count(*) FROM t_diskann_nodes00").fetchone()[0] == 5
+
+
+def test_diskann_delete_all_then_insert(db):
+    """Delete everything, then insert new vectors. Graph should rebuild."""
+    db.execute("""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[8] INDEXED BY diskann(neighbor_quantizer=binary, n_neighbors=8)
+        )
+    """)
+    for i in range(1, 6):
+        db.execute("INSERT INTO t(rowid, emb) VALUES (?, ?)", [i, _f32([float(i)] * 8)])
+
+    # Delete all
+    for i in range(1, 6):
+        db.execute("DELETE FROM t WHERE rowid = ?", [i])
+    assert db.execute("SELECT count(*) FROM t_vectors00").fetchone()[0] == 0
+
+    medoid = db.execute("SELECT value FROM t_info WHERE key = 'diskann_medoid_00'").fetchone()[0]
+    assert medoid is None
+
+    # Insert new vectors
+    for i in range(10, 15):
+        db.execute("INSERT INTO t(rowid, emb) VALUES (?, ?)", [i, _f32([float(i)] * 8)])
+
+    assert db.execute("SELECT count(*) FROM t_vectors00").fetchone()[0] == 5
+    assert db.execute("SELECT count(*) FROM t_diskann_nodes00").fetchone()[0] == 5
+
+    medoid = db.execute("SELECT value FROM t_info WHERE key = 'diskann_medoid_00'").fetchone()[0]
+    assert medoid is not None
+
+    # KNN should work
+    rows = db.execute(
+        "SELECT rowid FROM t WHERE emb MATCH ? AND k=3",
+        [_f32([12.0] * 8)],
+    ).fetchall()
+    assert len(rows) == 3
+
+
+def test_diskann_delete_preserves_graph_connectivity(db):
+    """After deleting a node, remaining nodes should still be reachable via KNN."""
+    db.execute("""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[8] INDEXED BY diskann(neighbor_quantizer=binary, n_neighbors=8)
+        )
+    """)
+    import random
+    random.seed(456)
+    for i in range(1, 21):
+        vec = [random.gauss(0, 1) for _ in range(8)]
+        db.execute("INSERT INTO t(rowid, emb) VALUES (?, ?)", [i, _f32(vec)])
+
+    # Delete 5 nodes
+    for i in [3, 7, 11, 15, 19]:
+        db.execute("DELETE FROM t WHERE rowid = ?", [i])
+
+    remaining = db.execute("SELECT count(*) FROM t_vectors00").fetchone()[0]
+    assert remaining == 15
+
+    # Every remaining node should be reachable via KNN (appears somewhere in top-k)
+    all_rowids = [r[0] for r in db.execute("SELECT rowid FROM t_vectors00").fetchall()]
+    reachable = set()
+    for rid in all_rowids:
+        vec_blob = db.execute("SELECT vector FROM t_vectors00 WHERE rowid = ?", [rid]).fetchone()[0]
+        rows = db.execute(
+            "SELECT rowid FROM t WHERE emb MATCH ? AND k=5",
+            [vec_blob],
+        ).fetchall()
+        assert len(rows) >= 1  # At least some results
+        for r in rows:
+            reachable.add(r[0])
+    # Most nodes should be reachable through the graph
+    assert len(reachable) >= len(all_rowids) * 0.8, \
+        f"Only {len(reachable)}/{len(all_rowids)} nodes reachable"
+
+
+# ======================================================================
+# Update scenarios
+# ======================================================================
+
+def test_diskann_update_vector(db):
+    """UPDATE a vector on DiskANN table may not be supported; verify it either works or errors cleanly."""
+    db.execute("""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[8] INDEXED BY diskann(neighbor_quantizer=binary, n_neighbors=8)
+        )
+    """)
+    db.execute("INSERT INTO t(rowid, emb) VALUES (1, ?)", [_f32([1, 0, 0, 0, 0, 0, 0, 0])])
+    db.execute("INSERT INTO t(rowid, emb) VALUES (2, ?)", [_f32([0, 1, 0, 0, 0, 0, 0, 0])])
+    db.execute("INSERT INTO t(rowid, emb) VALUES (3, ?)", [_f32([0, 0, 1, 0, 0, 0, 0, 0])])
+
+    # UPDATE may not be fully supported for DiskANN yet; verify no crash
+    result = exec(db, "UPDATE t SET emb = ? WHERE rowid = 1", [_f32([0, 0.9, 0.1, 0, 0, 0, 0, 0])])
+    if "error" not in result:
+        # If UPDATE succeeded, verify KNN reflects the new value
+        rows = db.execute(
+            "SELECT rowid, distance FROM t WHERE emb MATCH ? AND k=3",
+            [_f32([0, 1, 0, 0, 0, 0, 0, 0])],
+        ).fetchall()
+        assert len(rows) == 3
+        # rowid 2 should still be closest (exact match)
+        assert rows[0][0] == 2
+
+
+# ======================================================================
+# KNN correctness after mutations
+# ======================================================================
+
+def test_diskann_knn_recall_after_inserts(db):
+    """Insert N vectors, verify top-1 recall is 100% for exact matches."""
+    db.execute("""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[8] INDEXED BY diskann(neighbor_quantizer=binary, n_neighbors=16)
+        )
+    """)
+    import random
+    random.seed(200)
+    vectors = {}
+    for i in range(1, 51):
+        vec = [random.gauss(0, 1) for _ in range(8)]
+        vectors[i] = vec
+        db.execute("INSERT INTO t(rowid, emb) VALUES (?, ?)", [i, _f32(vec)])
+
+    # Top-1 for each vector should return itself
+    correct = 0
+    for rid, vec in vectors.items():
+        rows = db.execute(
+            "SELECT rowid FROM t WHERE emb MATCH ? AND k=1",
+            [_f32(vec)],
+        ).fetchall()
+        if rows and rows[0][0] == rid:
+            correct += 1
+
+    # With binary quantizer, approximate search may not always return exact match
+    # but should have high recall (at least 80%)
+    assert correct >= len(vectors) * 0.8, f"Top-1 recall too low: {correct}/{len(vectors)}"
+
+
+def test_diskann_knn_k_larger_than_table(db):
+    """k=100 on table with 5 rows should return 5."""
+    db.execute("""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[8] INDEXED BY diskann(neighbor_quantizer=binary, n_neighbors=8)
+        )
+    """)
+    for i in range(1, 6):
+        db.execute("INSERT INTO t(rowid, emb) VALUES (?, ?)", [i, _f32([float(i)] * 8)])
+
+    rows = db.execute(
+        "SELECT rowid, distance FROM t WHERE emb MATCH ? AND k=100",
+        [_f32([3.0] * 8)],
+    ).fetchall()
+    assert len(rows) == 5
+
+
+def test_diskann_knn_cosine_metric(db):
+    """KNN with cosine distance metric."""
+    db.execute("""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[8] distance_metric=cosine INDEXED BY diskann(neighbor_quantizer=binary, n_neighbors=8)
+        )
+    """)
+    # Insert orthogonal-ish vectors
+    db.execute("INSERT INTO t(rowid, emb) VALUES (1, ?)", [_f32([1, 0, 0, 0, 0, 0, 0, 0])])
+    db.execute("INSERT INTO t(rowid, emb) VALUES (2, ?)", [_f32([0, 1, 0, 0, 0, 0, 0, 0])])
+    db.execute("INSERT INTO t(rowid, emb) VALUES (3, ?)", [_f32([0.7, 0.7, 0, 0, 0, 0, 0, 0])])
+
+    rows = db.execute(
+        "SELECT rowid, distance FROM t WHERE emb MATCH ? AND k=3",
+        [_f32([1, 0, 0, 0, 0, 0, 0, 0])],
+    ).fetchall()
+    assert len(rows) == 3
+    # rowid 1 should be closest (exact match in direction)
+    assert rows[0][0] == 1
+    # Distances should be sorted
+    distances = [r[1] for r in rows]
+    for i in range(len(distances) - 1):
+        assert distances[i] <= distances[i + 1]
+
+
+def test_diskann_knn_after_heavy_churn(db):
+    """Interleave many inserts and deletes, then query."""
+    db.execute("""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[8] INDEXED BY diskann(neighbor_quantizer=binary, n_neighbors=16)
+        )
+    """)
+    import random
+    random.seed(321)
+
+    # Insert 50 vectors
+    for i in range(1, 51):
+        vec = [random.gauss(0, 1) for _ in range(8)]
+        db.execute("INSERT INTO t(rowid, emb) VALUES (?, ?)", [i, _f32(vec)])
+
+    # Delete even-numbered rows
+    for i in range(2, 51, 2):
+        db.execute("DELETE FROM t WHERE rowid = ?", [i])
+
+    # Insert more vectors with higher rowids
+    for i in range(51, 76):
+        vec = [random.gauss(0, 1) for _ in range(8)]
+        db.execute("INSERT INTO t(rowid, emb) VALUES (?, ?)", [i, _f32(vec)])
+
+    remaining = db.execute("SELECT count(*) FROM t_vectors00").fetchone()[0]
+    assert remaining == 50  # 25 odd + 25 new
+
+    # KNN should still work and return results
+    query = [random.gauss(0, 1) for _ in range(8)]
+    rows = db.execute(
+        "SELECT rowid, distance FROM t WHERE emb MATCH ? AND k=10",
+        [_f32(query)],
+    ).fetchall()
+    assert len(rows) == 10
+    # Distances should be sorted
+    distances = [r[1] for r in rows]
+    for i in range(len(distances) - 1):
+        assert distances[i] <= distances[i + 1]
+
+
+def test_diskann_knn_batch_recall(db):
+    """Insert 100+ vectors and verify reasonable recall."""
+    db.execute("""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[16] INDEXED BY diskann(neighbor_quantizer=binary, n_neighbors=16)
+        )
+    """)
+    import random
+    random.seed(42)
+    N = 150
+    vectors = {}
+    for i in range(1, N + 1):
+        vec = [random.gauss(0, 1) for _ in range(16)]
+        vectors[i] = vec
+        db.execute("INSERT INTO t(rowid, emb) VALUES (?, ?)", [i, _f32(vec)])
+
+    # Brute-force top-5 for a query and compare with DiskANN
+    query = [random.gauss(0, 1) for _ in range(16)]
+
+    # Compute true distances
+    true_dists = []
+    for rid, vec in vectors.items():
+        d = sum((a - b) ** 2 for a, b in zip(query, vec))
+        true_dists.append((d, rid))
+    true_dists.sort()
+    true_top5 = set(r for _, r in true_dists[:5])
+
+    rows = db.execute(
+        "SELECT rowid, distance FROM t WHERE emb MATCH ? AND k=5",
+        [_f32(query)],
+    ).fetchall()
+    result_top5 = set(r[0] for r in rows)
+    assert len(rows) == 5
+
+    # At least 3 of top-5 should match (reasonable recall for approximate search)
+    overlap = len(true_top5 & result_top5)
+    assert overlap >= 3, f"Recall too low: only {overlap}/5 overlap"
+
+
+# ======================================================================
+# Additional edge cases
+# ======================================================================
+
+def test_diskann_insert_wrong_dimensions(db):
+    """INSERT with wrong dimension vector should error."""
+    db.execute("""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[8] INDEXED BY diskann(neighbor_quantizer=binary, n_neighbors=8)
+        )
+    """)
+    result = exec(db, "INSERT INTO t(rowid, emb) VALUES (1, ?)", [_f32([1.0] * 4)])
+    assert "error" in result
+
+
+def test_diskann_knn_wrong_query_dimensions(db):
+    """KNN MATCH with wrong dimension query should error."""
+    db.execute("""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[8] INDEXED BY diskann(neighbor_quantizer=binary, n_neighbors=8)
+        )
+    """)
+    db.execute("INSERT INTO t(rowid, emb) VALUES (1, ?)", [_f32([1.0] * 8)])
+
+    result = exec(db, "SELECT rowid FROM t WHERE emb MATCH ? AND k=1", [_f32([1.0] * 4)])
+    assert "error" in result
+
+
+def test_diskann_graph_connectivity_after_many_deletes(db):
+    """After many deletes, the graph should still be connected enough for search."""
+    db.execute("""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[8] INDEXED BY diskann(neighbor_quantizer=binary, n_neighbors=16)
+        )
+    """)
+    import random
+    random.seed(789)
+    N = 40
+    for i in range(1, N + 1):
+        vec = [random.gauss(0, 1) for _ in range(8)]
+        db.execute("INSERT INTO t(rowid, emb) VALUES (?, ?)", [i, _f32(vec)])
+
+    # Delete 30 of 40 nodes
+    to_delete = list(range(1, 31))
+    for i in to_delete:
+        db.execute("DELETE FROM t WHERE rowid = ?", [i])
+
+    remaining = db.execute("SELECT count(*) FROM t_vectors00").fetchone()[0]
+    assert remaining == 10
+
+    # Search should still work and return results
+    query = [random.gauss(0, 1) for _ in range(8)]
+    rows = db.execute(
+        "SELECT rowid, distance FROM t WHERE emb MATCH ? AND k=10",
+        [_f32(query)],
+    ).fetchall()
+    # Should return some results (graph may be fragmented after heavy deletion)
+    assert len(rows) >= 1
+    # Distances should be sorted
+    distances = [r[1] for r in rows]
+    for i in range(len(distances) - 1):
+        assert distances[i] <= distances[i + 1]
+
+
+def test_diskann_large_batch_insert_500(db):
+    """Insert 500+ vectors and verify counts and KNN."""
+    db.execute("""
+        CREATE VIRTUAL TABLE t USING vec0(
+            emb float[8] INDEXED BY diskann(neighbor_quantizer=binary, n_neighbors=16)
+        )
+    """)
+    import random
+    random.seed(555)
+    N = 500
+    for i in range(1, N + 1):
+        vec = [random.gauss(0, 1) for _ in range(8)]
+        db.execute("INSERT INTO t(rowid, emb) VALUES (?, ?)", [i, _f32(vec)])
+
+    assert db.execute("SELECT count(*) FROM t_vectors00").fetchone()[0] == N
+
+    query = [random.gauss(0, 1) for _ in range(8)]
+    rows = db.execute(
+        "SELECT rowid, distance FROM t WHERE emb MATCH ? AND k=20",
+        [_f32(query)],
+    ).fetchall()
+    assert len(rows) == 20
+    distances = [r[1] for r in rows]
+    for i in range(len(distances) - 1):
+        assert distances[i] <= distances[i + 1]
