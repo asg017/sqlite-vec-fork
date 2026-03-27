@@ -209,6 +209,33 @@ size_t _test_rescore_quantized_byte_size_int8(size_t dimensions);
 void ivf_quantize_int8(const float *src, int8_t *dst, int D);
 void ivf_quantize_binary(const float *src, uint8_t *dst, int D);
 #endif
+// DiskANN candidate list (opaque struct, use accessors)
+struct DiskannCandidateList {
+  void *items;  // opaque
+  int count;
+  int capacity;
+};
+
+int _test_diskann_candidate_list_init(struct DiskannCandidateList *list, int capacity);
+void _test_diskann_candidate_list_free(struct DiskannCandidateList *list);
+int _test_diskann_candidate_list_insert(struct DiskannCandidateList *list, long long rowid, float distance);
+int _test_diskann_candidate_list_next_unvisited(const struct DiskannCandidateList *list);
+int _test_diskann_candidate_list_count(const struct DiskannCandidateList *list);
+long long _test_diskann_candidate_list_rowid(const struct DiskannCandidateList *list, int i);
+float _test_diskann_candidate_list_distance(const struct DiskannCandidateList *list, int i);
+void _test_diskann_candidate_list_set_visited(struct DiskannCandidateList *list, int i);
+
+// DiskANN visited set (opaque struct, use accessors)
+struct DiskannVisitedSet {
+  void *slots;  // opaque
+  int capacity;
+  int count;
+};
+
+int _test_diskann_visited_set_init(struct DiskannVisitedSet *set, int capacity);
+void _test_diskann_visited_set_free(struct DiskannVisitedSet *set);
+int _test_diskann_visited_set_contains(const struct DiskannVisitedSet *set, long long rowid);
+int _test_diskann_visited_set_insert(struct DiskannVisitedSet *set, long long rowid);
 #endif
 
 #endif /* SQLITE_VEC_INTERNAL_H */

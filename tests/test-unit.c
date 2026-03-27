@@ -1838,6 +1838,243 @@ void test_diskann_config_defaults() {
   printf("  All diskann_config_defaults tests passed.\n");
 }
 
+// ======================================================================
+// Additional DiskANN unit tests
+// ======================================================================
+
+void test_diskann_quantize_int8() {
+  printf("Starting %s...\n", __func__);
+
+  // INT8 quantization uses fixed range [-1, 1]:
+  //   step = 2.0 / 255.0
+  //   out[i] = (i8)((src[i] + 1.0) / step - 128.0)
+  float src[4] = {-1.0f, 0.0f, 0.5f, 1.0f};
+  unsigned char out[4];
+
+  int rc = diskann_quantize_vector(src, 4, VEC0_DISKANN_QUANTIZER_INT8, out);
+  assert(rc == 0);
+
+  int8_t *signed_out = (int8_t *)out;
+  // -1.0 -> (0/step) - 128 = -128
+  assert(signed_out[0] == -128);
+  // 0.0 -> (1.0/step) - 128 ~= 127.5 - 128 ~= -0.5 -> (i8)(-0.5) = 0
+  assert(signed_out[1] >= -2 && signed_out[1] <= 2);
+  // 0.5 -> (1.5/step) - 128 ~= 191.25 - 128 = 63.25 -> (i8) 63
+  assert(signed_out[2] >= 60 && signed_out[2] <= 66);
+  // 1.0 -> should be close to 127 (may have float precision issues)
+  assert(signed_out[3] >= 126 && signed_out[3] <= 127);
+
+  printf("  All diskann_quantize_int8 tests passed.\n");
+}
+
+void test_diskann_quantize_binary_16d() {
+  printf("Starting %s...\n", __func__);
+
+  // 16-dimensional vector (2 bytes output)
+  float src[16] = {
+    1.0f, -1.0f, 0.5f, -0.5f,  // byte 0: bit0=1, bit1=0, bit2=1, bit3=0
+    0.1f, -0.1f, 0.0f, 100.0f, // byte 0: bit4=1, bit5=0, bit6=0, bit7=1
+    -1.0f, 1.0f, 1.0f, 1.0f,   // byte 1: bit0=0, bit1=1, bit2=1, bit3=1
+    -1.0f, -1.0f, 1.0f, -1.0f  // byte 1: bit4=0, bit5=0, bit6=1, bit7=0
+  };
+  unsigned char out[2];
+
+  int rc = diskann_quantize_vector(src, 16, VEC0_DISKANN_QUANTIZER_BINARY, out);
+  assert(rc == 0);
+
+  // byte 0: bits 0,2,4,7 set -> 0b10010101 = 0x95
+  assert(out[0] == 0x95);
+  // byte 1: bits 1,2,3,6 set -> 0b01001110 = 0x4E
+  assert(out[1] == 0x4E);
+
+  printf("  All diskann_quantize_binary_16d tests passed.\n");
+}
+
+void test_diskann_quantize_binary_all_positive() {
+  printf("Starting %s...\n", __func__);
+
+  float src[8] = {1.0f, 2.0f, 0.1f, 0.001f, 100.0f, 42.0f, 0.5f, 3.14f};
+  unsigned char out[1];
+
+  int rc = diskann_quantize_vector(src, 8, VEC0_DISKANN_QUANTIZER_BINARY, out);
+  assert(rc == 0);
+  assert(out[0] == 0xFF);  // All bits set
+
+  printf("  All diskann_quantize_binary_all_positive tests passed.\n");
+}
+
+void test_diskann_quantize_binary_all_negative() {
+  printf("Starting %s...\n", __func__);
+
+  float src[8] = {-1.0f, -2.0f, -0.1f, -0.001f, -100.0f, -42.0f, -0.5f, 0.0f};
+  unsigned char out[1];
+
+  int rc = diskann_quantize_vector(src, 8, VEC0_DISKANN_QUANTIZER_BINARY, out);
+  assert(rc == 0);
+  assert(out[0] == 0x00);  // No bits set (all <= 0)
+
+  printf("  All diskann_quantize_binary_all_negative tests passed.\n");
+}
+
+void test_diskann_candidate_list_operations() {
+  printf("Starting %s...\n", __func__);
+
+  struct DiskannCandidateList list;
+  int rc = _test_diskann_candidate_list_init(&list, 5);
+  assert(rc == 0);
+
+  // Insert candidates in non-sorted order
+  _test_diskann_candidate_list_insert(&list, 10, 3.0f);
+  _test_diskann_candidate_list_insert(&list, 20, 1.0f);
+  _test_diskann_candidate_list_insert(&list, 30, 2.0f);
+
+  assert(_test_diskann_candidate_list_count(&list) == 3);
+  // Should be sorted by distance
+  assert(_test_diskann_candidate_list_rowid(&list, 0) == 20);  // dist 1.0
+  assert(_test_diskann_candidate_list_rowid(&list, 1) == 30);  // dist 2.0
+  assert(_test_diskann_candidate_list_rowid(&list, 2) == 10);  // dist 3.0
+
+  assert(_test_diskann_candidate_list_distance(&list, 0) == 1.0f);
+  assert(_test_diskann_candidate_list_distance(&list, 1) == 2.0f);
+  assert(_test_diskann_candidate_list_distance(&list, 2) == 3.0f);
+
+  // Deduplication: inserting same rowid with better distance should update
+  _test_diskann_candidate_list_insert(&list, 10, 0.5f);
+  assert(_test_diskann_candidate_list_count(&list) == 3);  // Same count
+  assert(_test_diskann_candidate_list_rowid(&list, 0) == 10);  // Now first
+  assert(_test_diskann_candidate_list_distance(&list, 0) == 0.5f);
+
+  // Next unvisited: should be index 0
+  int idx = _test_diskann_candidate_list_next_unvisited(&list);
+  assert(idx == 0);
+
+  // Mark visited
+  _test_diskann_candidate_list_set_visited(&list, 0);
+  idx = _test_diskann_candidate_list_next_unvisited(&list);
+  assert(idx == 1);  // Skip visited
+
+  // Fill to capacity (5) and try inserting a worse candidate
+  _test_diskann_candidate_list_insert(&list, 40, 4.0f);
+  _test_diskann_candidate_list_insert(&list, 50, 5.0f);
+  assert(_test_diskann_candidate_list_count(&list) == 5);
+
+  // Insert worse than worst -> should be discarded
+  int inserted = _test_diskann_candidate_list_insert(&list, 60, 10.0f);
+  assert(inserted == 0);
+  assert(_test_diskann_candidate_list_count(&list) == 5);
+
+  // Insert better than worst -> should replace worst
+  inserted = _test_diskann_candidate_list_insert(&list, 60, 3.5f);
+  assert(inserted == 1);
+  assert(_test_diskann_candidate_list_count(&list) == 5);
+
+  _test_diskann_candidate_list_free(&list);
+
+  printf("  All diskann_candidate_list_operations tests passed.\n");
+}
+
+void test_diskann_visited_set_operations() {
+  printf("Starting %s...\n", __func__);
+
+  struct DiskannVisitedSet set;
+  int rc = _test_diskann_visited_set_init(&set, 32);
+  assert(rc == 0);
+
+  // Empty set
+  assert(_test_diskann_visited_set_contains(&set, 1) == 0);
+  assert(_test_diskann_visited_set_contains(&set, 100) == 0);
+
+  // Insert and check
+  int inserted = _test_diskann_visited_set_insert(&set, 42);
+  assert(inserted == 1);
+  assert(_test_diskann_visited_set_contains(&set, 42) == 1);
+  assert(_test_diskann_visited_set_contains(&set, 43) == 0);
+
+  // Double insert returns 0
+  inserted = _test_diskann_visited_set_insert(&set, 42);
+  assert(inserted == 0);
+
+  // Insert several
+  _test_diskann_visited_set_insert(&set, 1);
+  _test_diskann_visited_set_insert(&set, 2);
+  _test_diskann_visited_set_insert(&set, 100);
+  _test_diskann_visited_set_insert(&set, 999);
+  assert(_test_diskann_visited_set_contains(&set, 1) == 1);
+  assert(_test_diskann_visited_set_contains(&set, 2) == 1);
+  assert(_test_diskann_visited_set_contains(&set, 100) == 1);
+  assert(_test_diskann_visited_set_contains(&set, 999) == 1);
+  assert(_test_diskann_visited_set_contains(&set, 3) == 0);
+
+  // Sentinel value (rowid 0) should not be insertable
+  assert(_test_diskann_visited_set_contains(&set, 0) == 0);
+  inserted = _test_diskann_visited_set_insert(&set, 0);
+  assert(inserted == 0);
+
+  _test_diskann_visited_set_free(&set);
+
+  printf("  All diskann_visited_set_operations tests passed.\n");
+}
+
+void test_diskann_prune_select_single_candidate() {
+  printf("Starting %s...\n", __func__);
+
+  float p_distances[1] = {5.0f};
+  float inter[1] = {0.0f};
+  int selected[1];
+  int count;
+
+  int rc = diskann_prune_select(inter, p_distances, 1, 1.0f, 3, selected, &count);
+  assert(rc == 0);
+  assert(count == 1);
+  assert(selected[0] == 1);
+
+  printf("  All diskann_prune_select_single_candidate tests passed.\n");
+}
+
+void test_diskann_prune_select_all_identical_distances() {
+  printf("Starting %s...\n", __func__);
+
+  float p_distances[4] = {2.0f, 2.0f, 2.0f, 2.0f};
+  // All inter-distances are equal too
+  float inter[16] = {
+    0.0f, 1.0f, 1.0f, 1.0f,
+    1.0f, 0.0f, 1.0f, 1.0f,
+    1.0f, 1.0f, 0.0f, 1.0f,
+    1.0f, 1.0f, 1.0f, 0.0f,
+  };
+  int selected[4];
+  int count;
+
+  // alpha=1.0: pick first, then check if alpha * inter[0][j] <= p_dist[j]
+  // 1.0 * 1.0 <= 2.0? yes, so all are pruned after picking the first
+  int rc = diskann_prune_select(inter, p_distances, 4, 1.0f, 4, selected, &count);
+  assert(rc == 0);
+  assert(count >= 1);  // At least one selected
+
+  printf("  All diskann_prune_select_all_identical_distances tests passed.\n");
+}
+
+void test_diskann_prune_select_max_neighbors_1() {
+  printf("Starting %s...\n", __func__);
+
+  float p_distances[3] = {1.0f, 2.0f, 3.0f};
+  float inter[9] = {
+    0.0f, 5.0f, 5.0f,
+    5.0f, 0.0f, 5.0f,
+    5.0f, 5.0f, 0.0f,
+  };
+  int selected[3];
+  int count;
+
+  // R=1: should select exactly 1
+  int rc = diskann_prune_select(inter, p_distances, 3, 1.0f, 1, selected, &count);
+  assert(rc == 0);
+  assert(count == 1);
+  assert(selected[0] == 1);  // First (closest) is selected
+
+  printf("  All diskann_prune_select_max_neighbors_1 tests passed.\n");
+}
+
 int main() {
   printf("Starting unit tests...\n");
 #ifdef SQLITE_VEC_ENABLE_AVX
@@ -1878,5 +2115,14 @@ int main() {
   test_diskann_prune_select();
   test_diskann_quantized_vector_byte_size();
   test_diskann_config_defaults();
+  test_diskann_quantize_int8();
+  test_diskann_quantize_binary_16d();
+  test_diskann_quantize_binary_all_positive();
+  test_diskann_quantize_binary_all_negative();
+  test_diskann_candidate_list_operations();
+  test_diskann_visited_set_operations();
+  test_diskann_prune_select_single_candidate();
+  test_diskann_prune_select_all_identical_distances();
+  test_diskann_prune_select_max_neighbors_1();
   printf("All unit tests passed.\n");
 }

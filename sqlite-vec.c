@@ -61,6 +61,10 @@ SQLITE_EXTENSION_INIT1
 #define LONGDOUBLE_TYPE long double
 #endif
 
+#ifndef SQLITE_VEC_ENABLE_DISKANN
+#define SQLITE_VEC_ENABLE_DISKANN 1
+#endif
+
 #ifndef _WIN32
 #ifndef __EMSCRIPTEN__
 #ifndef __COSMOPOLITAN__
@@ -3125,11 +3129,15 @@ int vec0_parse_vector_column(const char *source, int source_length,
         return SQLITE_ERROR; // IVF not compiled in
 #endif
       } else if (sqlite3_strnicmp(token.start, "diskann", indexNameLen) == 0) {
+#if SQLITE_VEC_ENABLE_DISKANN
         indexType = VEC0_INDEX_TYPE_DISKANN;
         rc = vec0_parse_diskann_options(&scanner, &diskannConfig);
         if (rc != SQLITE_OK) {
           return rc;
         }
+#else
+        return SQLITE_ERROR;
+#endif
       } else {
         // unknown index type
         return SQLITE_ERROR;
@@ -3593,7 +3601,7 @@ struct vec0_vtab {
   sqlite3_stmt *stmtRowidsGetChunkPosition;
 
   // === DiskANN additions ===
-
+#if SQLITE_VEC_ENABLE_DISKANN
   // Shadow table names for DiskANN, per vector column
   // e.g., "{schema}"."{table}_vectors{00..15}"
   char *shadowVectorsNames[VEC0_MAX_VECTOR_COLUMNS];
@@ -3608,6 +3616,7 @@ struct vec0_vtab {
   sqlite3_stmt *stmtDiskannNodeInsert[VEC0_MAX_VECTOR_COLUMNS];
   sqlite3_stmt *stmtVectorsRead[VEC0_MAX_VECTOR_COLUMNS];
   sqlite3_stmt *stmtVectorsInsert[VEC0_MAX_VECTOR_COLUMNS];
+#endif
 };
 
 #if SQLITE_VEC_ENABLE_RESCORE
@@ -3647,11 +3656,13 @@ void vec0_free_resources(vec0_vtab *p) {
     sqlite3_finalize(p->stmtIvfRowidMapLookup[i]); p->stmtIvfRowidMapLookup[i] = NULL;
     sqlite3_finalize(p->stmtIvfRowidMapDelete[i]); p->stmtIvfRowidMapDelete[i] = NULL;
     sqlite3_finalize(p->stmtIvfCentroidsAll[i]); p->stmtIvfCentroidsAll[i] = NULL;
+#if SQLITE_VEC_ENABLE_DISKANN
     sqlite3_finalize(p->stmtDiskannNodeRead[i]); p->stmtDiskannNodeRead[i] = NULL;
     sqlite3_finalize(p->stmtDiskannNodeWrite[i]); p->stmtDiskannNodeWrite[i] = NULL;
     sqlite3_finalize(p->stmtDiskannNodeInsert[i]); p->stmtDiskannNodeInsert[i] = NULL;
     sqlite3_finalize(p->stmtVectorsRead[i]); p->stmtVectorsRead[i] = NULL;
     sqlite3_finalize(p->stmtVectorsInsert[i]); p->stmtVectorsInsert[i] = NULL;
+#endif
   }
 #endif
 }
@@ -3689,10 +3700,12 @@ void vec0_free(vec0_vtab *p) {
     p->shadowRescoreVectorsNames[i] = NULL;
 #endif
 
+#if SQLITE_VEC_ENABLE_DISKANN
     sqlite3_free(p->shadowVectorsNames[i]);
     p->shadowVectorsNames[i] = NULL;
     sqlite3_free(p->shadowDiskannNodesNames[i]);
     p->shadowDiskannNodesNames[i] = NULL;
+#endif
 
     sqlite3_free(p->vector_columns[i].name);
     p->vector_columns[i].name = NULL;
@@ -3714,7 +3727,11 @@ void vec0_free(vec0_vtab *p) {
   }
 }
 
+#if SQLITE_VEC_ENABLE_DISKANN
 #include "sqlite-vec-diskann.c"
+#else
+static int vec0_all_columns_diskann(vec0_vtab *p) { (void)p; return 0; }
+#endif
 
 int vec0_num_defined_user_columns(vec0_vtab *p) {
   return p->numVectorColumns + p->numPartitionColumns + p->numAuxiliaryColumns + p->numMetadataColumns;
@@ -3986,6 +4003,7 @@ int vec0_get_vector_data(vec0_vtab *pVtab, i64 rowid, int vector_column_idx,
   vec0_vtab *p = pVtab;
   int rc, brc;
 
+#if SQLITE_VEC_ENABLE_DISKANN
   // DiskANN fast path: read from _vectors table
   if (p->vector_columns[vector_column_idx].index_type == VEC0_INDEX_TYPE_DISKANN) {
     void *vec = NULL;
@@ -4001,6 +4019,7 @@ int vec0_get_vector_data(vec0_vtab *pVtab, i64 rowid, int vector_column_idx,
     if (outVectorSize) *outVectorSize = vecSize;
     return SQLITE_OK;
   }
+#endif
 
   i64 chunk_id;
   i64 chunk_offset;
@@ -5150,6 +5169,31 @@ static int vec0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
     }
   }
 
+  // DiskANN columns cannot coexist with aux/metadata/partition columns
+  for (int i = 0; i < numVectorColumns; i++) {
+    if (pNew->vector_columns[i].index_type == VEC0_INDEX_TYPE_DISKANN) {
+      if (numAuxiliaryColumns > 0) {
+        *pzErr = sqlite3_mprintf(
+            VEC_CONSTRUCTOR_ERROR
+            "Auxiliary columns are not supported with DiskANN-indexed vector columns");
+        goto error;
+      }
+      if (numMetadataColumns > 0) {
+        *pzErr = sqlite3_mprintf(
+            VEC_CONSTRUCTOR_ERROR
+            "Metadata columns are not supported with DiskANN-indexed vector columns");
+        goto error;
+      }
+      if (numPartitionColumns > 0) {
+        *pzErr = sqlite3_mprintf(
+            VEC_CONSTRUCTOR_ERROR
+            "Partition key columns are not supported with DiskANN-indexed vector columns");
+        goto error;
+      }
+      break;
+    }
+  }
+
   sqlite3_str *createStr = sqlite3_str_new(NULL);
   sqlite3_str_appendall(createStr, "CREATE TABLE x(");
   if (pkColumnName) {
@@ -5254,6 +5298,7 @@ static int vec0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
       }
     }
 #endif
+#if SQLITE_VEC_ENABLE_DISKANN
     if (pNew->vector_columns[i].index_type == VEC0_INDEX_TYPE_DISKANN) {
       pNew->shadowVectorsNames[i] =
           sqlite3_mprintf("%s_vectors%02d", tableName, i);
@@ -5266,6 +5311,7 @@ static int vec0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
         goto error;
       }
     }
+#endif
   }
 #if SQLITE_VEC_ENABLE_IVF
   for (int i = 0; i < pNew->numVectorColumns; i++) {
@@ -5341,6 +5387,7 @@ static int vec0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
     }
     sqlite3_finalize(stmt);
 
+#if SQLITE_VEC_ENABLE_DISKANN
     // Seed medoid entries for DiskANN-indexed columns
     for (int i = 0; i < pNew->numVectorColumns; i++) {
       if (pNew->vector_columns[i].index_type != VEC0_INDEX_TYPE_DISKANN) {
@@ -5365,6 +5412,7 @@ static int vec0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
       }
       sqlite3_finalize(stmt);
     }
+#endif
 
     // create the _chunks shadow table
     char *zCreateShadowChunks = NULL;
@@ -5463,6 +5511,7 @@ static int vec0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
     }
 #endif
 
+#if SQLITE_VEC_ENABLE_DISKANN
     // Create DiskANN shadow tables for indexed vector columns
     for (int i = 0; i < pNew->numVectorColumns; i++) {
       if (pNew->vector_columns[i].index_type != VEC0_INDEX_TYPE_DISKANN) {
@@ -5538,6 +5587,7 @@ static int vec0_init(sqlite3 *db, void *pAux, int argc, const char *const *argv,
         sqlite3_finalize(stmt);
       }
     }
+#endif
 
     // See SHADOW_TABLE_ROWID_QUIRK in vec0_new_chunk() — same "rowid PRIMARY KEY"
     // without INTEGER type issue applies here.
@@ -5673,6 +5723,7 @@ static int vec0Destroy(sqlite3_vtab *pVtab) {
   sqlite3_finalize(stmt);
 
   for (int i = 0; i < p->numVectorColumns; i++) {
+#if SQLITE_VEC_ENABLE_DISKANN
     if (p->vector_columns[i].index_type == VEC0_INDEX_TYPE_DISKANN) {
       // Drop DiskANN shadow tables
       zSql = sqlite3_mprintf("DROP TABLE IF EXISTS " VEC0_SHADOW_VECTORS_N_NAME,
@@ -5710,6 +5761,7 @@ static int vec0Destroy(sqlite3_vtab *pVtab) {
       }
       continue;
     }
+#endif
 #if SQLITE_VEC_ENABLE_RESCORE
     if (p->vector_columns[i].index_type != VEC0_INDEX_TYPE_FLAT)
       continue;
@@ -7505,6 +7557,7 @@ cleanup:
 #include "sqlite-vec-rescore.c"
 #endif
 
+#if SQLITE_VEC_ENABLE_DISKANN
 /**
  * Handle a KNN query using the DiskANN graph search.
  */
@@ -7667,6 +7720,7 @@ static int vec0Filter_knn_diskann(
 
   return SQLITE_OK;
 }
+#endif /* SQLITE_VEC_ENABLE_DISKANN */
 
 int vec0Filter_knn(vec0_cursor *pCur, vec0_vtab *p, int idxNum,
                    const char *idxStr, int argc, sqlite3_value **argv) {
@@ -7678,10 +7732,12 @@ int vec0Filter_knn(vec0_cursor *pCur, vec0_vtab *p, int idxNum,
   struct VectorColumnDefinition *vector_column =
       &p->vector_columns[vectorColumnIdx];
 
+#if SQLITE_VEC_ENABLE_DISKANN
   // DiskANN dispatch
   if (vector_column->index_type == VEC0_INDEX_TYPE_DISKANN) {
     return vec0Filter_knn_diskann(pCur, p, idxNum, idxStr, argc, argv);
   }
+#endif
 
   struct Array *arrayRowidsIn = NULL;
   sqlite3_stmt *stmtChunks = NULL;
@@ -9173,6 +9229,7 @@ int vec0Update_Insert(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv,
     }
   }
 
+#if SQLITE_VEC_ENABLE_DISKANN
   // Step #4: Insert into DiskANN graph for indexed vector columns
   for (int i = 0; i < p->numVectorColumns; i++) {
     if (p->vector_columns[i].index_type != VEC0_INDEX_TYPE_DISKANN) continue;
@@ -9181,6 +9238,7 @@ int vec0Update_Insert(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv,
       goto cleanup;
     }
   }
+#endif
 
 #if SQLITE_VEC_ENABLE_RESCORE
   rc = rescore_on_insert(p, chunk_rowid, chunk_offset, rowid, vectorDatas);
@@ -9716,6 +9774,7 @@ int vec0Update_Delete(sqlite3_vtab *pVTab, sqlite3_value *idValue) {
   // 4. Zero out vector data in all vector column chunks
   // 5. Delete value in _rowids table
 
+#if SQLITE_VEC_ENABLE_DISKANN
   // DiskANN graph deletion for indexed columns
   for (int i = 0; i < p->numVectorColumns; i++) {
     if (p->vector_columns[i].index_type != VEC0_INDEX_TYPE_DISKANN) continue;
@@ -9724,6 +9783,7 @@ int vec0Update_Delete(sqlite3_vtab *pVTab, sqlite3_value *idValue) {
       return rc;
     }
   }
+#endif
 
   if (!vec0_all_columns_diskann(p)) {
     // 1. get chunk_id and chunk_offset from _rowids
@@ -10085,8 +10145,10 @@ static int vec0Update(sqlite3_vtab *pVTab, int argc, sqlite3_value **argv,
       const char *cmd = (const char *)sqlite3_value_text(idVal);
       vec0_vtab *p = (vec0_vtab *)pVTab;
       int cmdRc = ivf_handle_command(p, cmd, argc, argv);
+#if SQLITE_VEC_ENABLE_DISKANN
       if (cmdRc == SQLITE_EMPTY)
         cmdRc = diskann_handle_command(p, cmd);
+#endif
       if (cmdRc != SQLITE_EMPTY) return cmdRc; // handled (or error)
       // SQLITE_EMPTY means not a recognized command — fall through to normal insert
     }
@@ -10244,9 +10306,16 @@ static sqlite3_module vec0Module = {
 #define SQLITE_VEC_DEBUG_BUILD_IVF ""
 #endif
 
+#if SQLITE_VEC_ENABLE_DISKANN
+#define SQLITE_VEC_DEBUG_BUILD_DISKANN "diskann"
+#else
+#define SQLITE_VEC_DEBUG_BUILD_DISKANN ""
+#endif
+
 #define SQLITE_VEC_DEBUG_BUILD                                                 \
   SQLITE_VEC_DEBUG_BUILD_AVX " " SQLITE_VEC_DEBUG_BUILD_NEON " "              \
-  SQLITE_VEC_DEBUG_BUILD_RESCORE " " SQLITE_VEC_DEBUG_BUILD_IVF
+  SQLITE_VEC_DEBUG_BUILD_RESCORE " " SQLITE_VEC_DEBUG_BUILD_IVF " "           \
+  SQLITE_VEC_DEBUG_BUILD_DISKANN
 
 #define SQLITE_VEC_DEBUG_STRING                                                \
   "Version: " SQLITE_VEC_VERSION "\n"                                          \
