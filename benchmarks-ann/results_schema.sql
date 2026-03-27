@@ -10,8 +10,10 @@ CREATE TABLE IF NOT EXISTS runs (
   subset_size     INTEGER NOT NULL,
   k               INTEGER NOT NULL,
   n_queries       INTEGER NOT NULL,
+  phase           TEXT    NOT NULL DEFAULT 'both',
+    -- 'build', 'query', or 'both'
   status          TEXT    NOT NULL DEFAULT 'pending',
-    -- pending → inserting → training → querying → done | error
+    -- pending → inserting → training → querying → done | built | error
   created_at_ns   INTEGER NOT NULL    -- time.time_ns()
 );
 

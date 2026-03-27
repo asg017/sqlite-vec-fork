@@ -3,3 +3,6 @@
 *.db-wal
 *.parquet
 runs/
+
+viewer/
+searcher/
