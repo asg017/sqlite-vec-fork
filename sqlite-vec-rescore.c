@@ -637,3 +637,26 @@ cleanup:
   sqlite3_free(baseVectors);
   return rc;
 }
+
+#ifdef SQLITE_VEC_TEST
+void _test_rescore_quantize_float_to_bit(const float *src, uint8_t *dst, size_t dim) {
+  rescore_quantize_float_to_bit(src, dst, dim);
+}
+void _test_rescore_quantize_float_to_int8(const float *src, int8_t *dst, size_t dim) {
+  rescore_quantize_float_to_int8(src, dst, dim);
+}
+size_t _test_rescore_quantized_byte_size_bit(size_t dimensions) {
+  struct VectorColumnDefinition col;
+  memset(&col, 0, sizeof(col));
+  col.dimensions = dimensions;
+  col.rescore.quantizer_type = VEC0_RESCORE_QUANTIZER_BIT;
+  return rescore_quantized_byte_size(&col);
+}
+size_t _test_rescore_quantized_byte_size_int8(size_t dimensions) {
+  struct VectorColumnDefinition col;
+  memset(&col, 0, sizeof(col));
+  col.dimensions = dimensions;
+  col.rescore.quantizer_type = VEC0_RESCORE_QUANTIZER_INT8;
+  return rescore_quantized_byte_size(&col);
+}
+#endif
