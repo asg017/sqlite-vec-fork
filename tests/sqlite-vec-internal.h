@@ -5,6 +5,10 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifndef SQLITE_VEC_ENABLE_IVF
+#define SQLITE_VEC_ENABLE_IVF 1
+#endif
+
 int min_idx(
   const float *distances,
   int32_t n,
@@ -81,6 +85,7 @@ struct Vec0RescoreConfig {
   int oversample;
 };
 
+#if SQLITE_VEC_ENABLE_IVF
 enum Vec0IvfQuantizer {
   VEC0_IVF_QUANTIZER_NONE = 0,
   VEC0_IVF_QUANTIZER_INT8 = 1,
@@ -93,6 +98,9 @@ struct Vec0IvfConfig {
   int quantizer;
   int oversample;
 };
+#else
+struct Vec0IvfConfig { char _unused; };
+#endif
 
 #ifdef SQLITE_VEC_ENABLE_RESCORE
 enum Vec0RescoreQuantizerType {
@@ -137,6 +145,10 @@ void _test_rescore_quantize_float_to_bit(const float *src, uint8_t *dst, size_t 
 void _test_rescore_quantize_float_to_int8(const float *src, int8_t *dst, size_t dim);
 size_t _test_rescore_quantized_byte_size_bit(size_t dimensions);
 size_t _test_rescore_quantized_byte_size_int8(size_t dimensions);
+#endif
+#if SQLITE_VEC_ENABLE_IVF
+void ivf_quantize_int8(const float *src, int8_t *dst, int D);
+void ivf_quantize_binary(const float *src, uint8_t *dst, int D);
 #endif
 #endif
 
