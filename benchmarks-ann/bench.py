@@ -1010,7 +1010,7 @@ def _default_match_query(conn, query, k):
 
 
 def measure_knn(db_path, ext_path, base_db, params, subset_size, k=10, n=50,
-                results_db=None, run_id=None, pre_query_hook=None):
+                results_db=None, run_id=None, pre_query_hook=None, warmup=0):
     conn = sqlite3.connect(db_path)
     conn.enable_load_extension(True)
     conn.load_extension(ext_path)
@@ -1023,6 +1023,18 @@ def measure_knn(db_path, ext_path, base_db, params, subset_size, k=10, n=50,
 
     reg = INDEX_REGISTRY[params["index_type"]]
     query_fn = reg.get("run_query")
+
+    # Warmup: run random queries to populate OS page cache
+    if warmup > 0:
+        import random
+        warmup_vecs = [qv for _, qv in query_vectors]
+        print(f"  Warming up with {warmup} queries...", flush=True)
+        for _ in range(warmup):
+            wq = random.choice(warmup_vecs)
+            if query_fn:
+                query_fn(conn, params, wq, k)
+            else:
+                _default_match_query(conn, wq, k)
 
     if results_db and run_id:
         update_run_status(results_db, run_id, "querying")
@@ -1163,6 +1175,8 @@ def main():
                         help="dataset name (default: cohere1m)")
     parser.add_argument("--ext", default=EXT_PATH)
     parser.add_argument("-o", "--out-dir", default=os.path.join(_SCRIPT_DIR, "runs"))
+    parser.add_argument("--warmup", type=int, default=0,
+                        help="run N random warmup queries before measuring (default: 0)")
     parser.add_argument("--results-db-name", default="results.db",
                         help="results DB filename (default: results.db)")
     args = parser.parse_args()
@@ -1243,7 +1257,7 @@ def main():
                     db_path, args.ext, base_db,
                     params, args.subset_size, k=args.k, n=args.n,
                     results_db=results_db, run_id=run_id,
-                    pre_query_hook=pre_hook,
+                    pre_query_hook=pre_hook, warmup=args.warmup,
                 )
                 print(f"  KNN: mean={knn['mean_ms']}ms  recall@{args.k}={knn['recall']}")
             except Exception as e:
@@ -1290,11 +1304,13 @@ def main():
                     f"{build['file_size_mb']} MB"
                 )
 
+                pre_hook = reg.get("pre_query_hook")
                 print(f"  Measuring KNN (k={args.k}, n={args.n})...")
                 knn = measure_knn(
                     build["db_path"], args.ext, base_db,
                     params, args.subset_size, k=args.k, n=args.n,
                     results_db=results_db, run_id=run_id,
+                    pre_query_hook=pre_hook, warmup=args.warmup,
                 )
                 print(f"  KNN: mean={knn['mean_ms']}ms  recall@{args.k}={knn['recall']}")
             except Exception as e:
